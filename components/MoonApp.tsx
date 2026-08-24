@@ -59,7 +59,8 @@ import { KeyboardEvent, useEffect, useMemo, useRef, useState, type CSSProperties
 import { createPortal } from "react-dom";
 import { APP_NAME, BASE_PATH, withBasePath } from "@/lib/config";
 import { type Attachment, type CallSession, type DirectMessage, type Friend, type Member, type Message, type ServerInvite } from "@/lib/data";
-import { startLocalRealtimeSync } from "@/lib/local-sync";
+import { startSupabaseRealtimeSync } from "@/lib/supabase/sync";
+import { getSupabaseBrowserClient } from "@/lib/supabase/client";
 import { uploadLocalImage } from "@/lib/media";
 import { type HomeTab, useMoonStore } from "@/lib/store";
 
@@ -499,7 +500,7 @@ function FriendsScreen() {
   const list = friends.filter((friend) => homeTab === "online" ? friend.relation === "friend" && friend.status !== "offline" : homeTab === "all" ? friend.relation === "friend" : homeTab === "pending" ? friend.relation === "pending" : homeTab === "blocked" ? friend.relation === "blocked" : true).filter((friend) => friend.name.toLowerCase().includes(search.toLowerCase()) || friend.username?.toLowerCase().includes(search.toLowerCase()));
   const send = async () => { const result = await sendFriendRequest(friendName); setNote({ ok: result.ok, text: result.message }); if (result.ok) setFriendName(""); };
   const tabLabel = (tab: HomeTab) => ({ online: l("В сети", "Online"), all: l("Все", "All"), pending: l("Ожидание", "Pending"), blocked: l("Заблокированные", "Blocked"), add: l("Добавить друга", "Add Friend"), plus: "Moon Plus" }[tab]);
-  return <section className="friends-screen"><header className="friends-header"><strong><Users size={19}/> {l("Друзья", "Friends")}</strong>{(["online","all","pending","blocked"] as HomeTab[]).map((tab) => <button key={tab} className={homeTab === tab ? "active" : ""} onClick={() => setHomeTab(tab)}>{tabLabel(tab)}</button>)}<button className={`add-friend-tab ${homeTab === "add" ? "active" : ""}`} onClick={() => setHomeTab("add")}>{l("Добавить друга", "Add Friend")}</button></header>{homeTab === "add" ? <div className="add-friend-page"><h2>{l("ДОБАВИТЬ ДРУГА", "ADD FRIEND")}</h2><p>{l("Добавляй друзей по точному username Moon. Второй локальный аккаунт должен хотя бы один раз открыть Moon.", "Add friends by their exact Moon username. The other local account must have Moon open at least once.")}</p><div className="add-friend-box"><input value={friendName} onChange={(e) => { setFriendName(e.target.value); setNote(null); }} onKeyDown={(e) => { if (e.key === "Enter") void send(); }} placeholder={l("Username Moon", "Moon username")}/><button disabled={!friendName.trim()} onClick={() => void send()}>{l("Отправить запрос", "Send Friend Request")}</button></div>{note && <div className={`success-note ${note.ok ? "" : "error-note"}`}>{note.ok ? <Check size={17}/> : <UserX size={17}/>} {note.text}</div>}</div> : <div className="friends-body"><label className="friends-search"><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder={l("Поиск", "Search")}/><Search size={18}/></label><h3>{homeTab.toUpperCase()} — {list.length}</h3>{!list.length && <div className="friends-empty"><Users size={38}/><strong>{homeTab === "pending" ? l("Нет ожидающих заявок", "No pending requests") : l("Здесь пока пусто", "Nothing here yet")}</strong><span>{homeTab === "all" ? l("Добавь другой локальный аккаунт Moon в друзья.", "Add another local Moon account as a friend.") : l("Список появится здесь.", "Your list will appear here.")}</span></div>}<div className="friend-list">{list.map((friend) => <FriendRow key={`${friend.relation}-${friend.id}`} friend={friend} onMessage={() => void createDm(friend.id)} onAccept={friend.requestId ? () => void respond(friend.requestId!, "accept") : undefined} onIgnore={friend.requestId ? () => void respond(friend.requestId!, "reject") : undefined} onCancel={friend.requestId ? () => cancelFriendRequest(friend.requestId!) : undefined} onRemove={() => removeFriend(friend.id)}/>)}</div></div>}</section>;
+  return <section className="friends-screen"><header className="friends-header"><strong><Users size={19}/> {l("Друзья", "Friends")}</strong>{(["online","all","pending","blocked"] as HomeTab[]).map((tab) => <button key={tab} className={homeTab === tab ? "active" : ""} onClick={() => setHomeTab(tab)}>{tabLabel(tab)}</button>)}<button className={`add-friend-tab ${homeTab === "add" ? "active" : ""}`} onClick={() => setHomeTab("add")}>{l("Добавить друга", "Add Friend")}</button></header>{homeTab === "add" ? <div className="add-friend-page"><h2>{l("ДОБАВИТЬ ДРУГА", "ADD FRIEND")}</h2><p>{l("Добавляй друзей по точному username Moon. Пользователь должен быть зарегистрирован в Moon.", "Add friends by their exact Moon username. The user must be registered in Moon.")}</p><div className="add-friend-box"><input value={friendName} onChange={(e) => { setFriendName(e.target.value); setNote(null); }} onKeyDown={(e) => { if (e.key === "Enter") void send(); }} placeholder={l("Username Moon", "Moon username")}/><button disabled={!friendName.trim()} onClick={() => void send()}>{l("Отправить запрос", "Send Friend Request")}</button></div>{note && <div className={`success-note ${note.ok ? "" : "error-note"}`}>{note.ok ? <Check size={17}/> : <UserX size={17}/>} {note.text}</div>}</div> : <div className="friends-body"><label className="friends-search"><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder={l("Поиск", "Search")}/><Search size={18}/></label><h3>{homeTab.toUpperCase()} — {list.length}</h3>{!list.length && <div className="friends-empty"><Users size={38}/><strong>{homeTab === "pending" ? l("Нет ожидающих заявок", "No pending requests") : l("Здесь пока пусто", "Nothing here yet")}</strong><span>{homeTab === "all" ? l("Добавь пользователя Moon в друзья.", "Add another Moon user as a friend.") : l("Список появится здесь.", "Your list will appear here.")}</span></div>}<div className="friend-list">{list.map((friend) => <FriendRow key={`${friend.relation}-${friend.id}`} friend={friend} onMessage={() => void createDm(friend.id)} onAccept={friend.requestId ? () => void respond(friend.requestId!, "accept") : undefined} onIgnore={friend.requestId ? () => void respond(friend.requestId!, "reject") : undefined} onCancel={friend.requestId ? () => cancelFriendRequest(friend.requestId!) : undefined} onRemove={() => removeFriend(friend.id)}/>)}</div></div>}</section>;
 }
 
 function FriendRow({ friend, onMessage, onAccept, onIgnore, onCancel, onRemove }: { friend: Friend; onMessage: () => void; onAccept?: () => void; onIgnore?: () => void; onCancel?: () => void; onRemove: () => void }) {
@@ -517,14 +518,14 @@ function MoonPlusPage() {
   const [note, setNote] = useState("");
   const previewAvatar = currentUser.plus && currentUser.avatar !== currentUser.displayName.slice(0,1).toUpperCase() ? currentUser.avatar : withBasePath("/plus/avatar.gif");
   const previewBanner = currentUser.plus && currentUser.banner ? currentUser.banner : withBasePath("/plus/banner.gif");
-  const activate = () => { purchasePlus(); setNote(l("Moon Plus активирован в локальной сборке.", "Moon Plus activated in this local build.")); };
+  const activate = () => { purchasePlus(); setNote(l("Moon Plus активирован.", "Moon Plus activated.")); };
   const applyGifPack = () => {
     if (!currentUser.plus) return;
     const result = updateProfile({ avatar: withBasePath("/plus/avatar.gif"), banner: withBasePath("/plus/banner.gif") });
     setNote(result.ok ? l("PLUS GIF-оформление применено.", "PLUS GIF styling applied.") : result.message ?? l("Не удалось применить оформление.", "Could not apply styling."));
   };
   return <div className="plus-page plus-page-v2">
-    <div className="plus-hero"><div className="plus-logo"><Crown size={30}/></div><div><span>MOON PLUS</span><h1>{l("Больше персонализации профиля", "More profile personalization")}</h1><p>{l("Локальная тестовая подписка за 100 ₽ — активация происходит сразу, без оплаты.", "Local test subscription for 100 ₽ — activates instantly without real payment.")}</p></div><div className="plus-price"><strong>100 ₽</strong><span>/ {l("месяц", "month")}</span></div></div>
+    <div className="plus-hero"><div className="plus-logo"><Crown size={30}/></div><div><span>MOON PLUS</span><h1>{l("Больше персонализации профиля", "More profile personalization")}</h1><p>{l("Тестовая подписка за 100 ₽ — активация происходит сразу, без реального списания.", "Test subscription for 100 ₽ — activates instantly without a real charge.")}</p></div><div className="plus-price"><strong>100 ₽</strong><span>/ {l("месяц", "month")}</span></div></div>
     <div className="plus-subscription-layout">
       <aside className="plus-profile-preview"><div className="plus-preview-card"><BannerMedia className="plus-preview-banner" src={previewBanner}/><div className="plus-preview-body"><Avatar label={previewAvatar} status="online" large/><h2><NameStyle user={{...currentUser, plus:true}}>{currentUser.displayName}</NameStyle><UserBadges user={{...currentUser, plus:true, plusBadgeVisible:true}}/></h2><p>@{currentUser.username}</p><span>{l("Предпросмотр профиля Moon Plus", "Moon Plus profile preview")}</span></div></div><div className={`plus-status ${currentUser.plus ? "active" : ""}`}><Crown size={18}/><strong>{currentUser.plus ? l("Moon Plus активен", "Moon Plus active") : l("Moon Plus не активен", "Moon Plus inactive")}</strong></div>{!currentUser.plus ? <button className="plus-buy-button" onClick={activate}><Crown size={18}/>{l("Купить Moon Plus — 100 ₽", "Buy Moon Plus — 100 ₽")}</button> : <><button className="secondary-button full-button" onClick={applyGifPack}>{l("Применить GIF avatar.gif + banner.gif", "Apply GIF avatar.gif + banner.gif")}</button><ToggleSetting title={l("Показывать корону Plus", "Show Plus crown")} description={l("Можно скрыть корону рядом с никнеймом.", "You can hide the crown next to your nickname.")} checked={currentUser.plusBadgeVisible !== false} onChange={setVisible}/></>}{note && <div className="profile-save-note">{note}</div>}</aside>
       <main className="plus-main"><div className="plus-benefits"><div><ImageIcon size={24}/><h3>{l("GIF-аватар", "GIF avatar")}</h3><p>{l("Поддержка анимированных GIF-аватарок без остановки анимации.", "Animated GIF avatars stay animated across Moon.")}</p></div><div><Palette size={24}/><h3>{l("GIF-баннер", "GIF banner")}</h3><p>{l("Анимированный GIF-баннер в карточках и профиле.", "Animated GIF profile banners.")}</p></div><div><Crown size={24}/><h3>{l("Стиль никнейма", "Nickname style")}</h3><p>{l("Смена шрифта и цвета никнейма.", "Change nickname font and color.")}</p></div><div><Link2 size={24}/><h3>{l("Кастомная ссылка", "Custom invite link")}</h3><p>{l("Создавай ссылки вида moon.dev/Moon.", "Create links like moon.dev/Moon.")}</p></div></div>{currentUser.plus && <div className="plus-style-editor"><h3>{l("СТИЛЬ НИКНЕЙМА", "NICKNAME STYLE")}</h3><label>{l("Цвет", "Color")}<input type="color" value={currentUser.nicknameColor ?? "#f2f3f5"} onChange={(e) => setPlusStyle({ nicknameColor: e.target.value })}/></label><label>{l("Шрифт", "Font")}<select value={currentUser.nicknameFont ?? "default"} onChange={(e) => setPlusStyle({ nicknameFont: e.target.value as any })}><option value="default">Default</option><option value="serif">Serif</option><option value="mono">Mono</option><option value="rounded">Rounded</option></select></label><div className="plus-style-live"><NameStyle user={currentUser}>{currentUser.displayName}</NameStyle><UserBadges user={currentUser}/></div></div>}</main>
@@ -783,7 +784,7 @@ function DmCallStage({ call }: { call: CallSession }) {
 
   const toggleScreen = async () => {
     if (screen) { await stopScreenShare(); return; }
-    if (!window.isSecureContext) { setMediaError(l("Демонстрация экрана требует localhost или HTTPS.", "Screen sharing requires localhost or HTTPS.")); return; }
+    if (!window.isSecureContext) { setMediaError(l("Демонстрация экрана требует защищённое HTTPS-соединение.", "Screen sharing requires a secure HTTPS connection.")); return; }
     if (!navigator.mediaDevices?.getDisplayMedia) { setMediaError(l("Этот браузер не поддерживает демонстрацию экрана.", "This browser does not support screen sharing.")); return; }
 
     let stream: MediaStream;
@@ -880,7 +881,7 @@ function InviteModal({ close }: { close: () => void }) {
     if (!code) return;
     const url = `${window.location.origin}${BASE_PATH}/?invite=${encodeURIComponent(code)}`;
     await navigator.clipboard?.writeText(url);
-    setNote(l("Рабочая локальная ссылка скопирована.", "Working local link copied."));
+    setNote(l("Ссылка-приглашение скопирована.", "Invite link copied."));
   };
   const createCustom = () => {
     const result = createInvite(serverId, custom);
@@ -997,7 +998,7 @@ function PrivacySettings() {
   const l = useL();
   const settings = useMoonStore((s) => s.userSettings);
   const setSetting = useMoonStore((s) => s.setUserSetting);
-  return <div className="settings-card"><ToggleSetting title={l("Показывать профиль справа в ЛС", "Show DM Profile Panel")} description={l("Показывать профиль собеседника справа от переписки.", "Show the other user's profile on the right side of direct messages.")} checked={settings.showDmProfile} onChange={(value) => setSetting("showDmProfile", value)}/><ToggleSetting title={l("Режим стримера", "Streamer Mode")} description={l("Скрывать чувствительные данные локального аккаунта.", "Hide sensitive local account details in account settings.")} checked={settings.streamerMode} onChange={(value) => setSetting("streamerMode", value)}/></div>;
+  return <div className="settings-card"><ToggleSetting title={l("Показывать профиль справа в ЛС", "Show DM Profile Panel")} description={l("Показывать профиль собеседника справа от переписки.", "Show the other user's profile on the right side of direct messages.")} checked={settings.showDmProfile} onChange={(value) => setSetting("showDmProfile", value)}/><ToggleSetting title={l("Режим стримера", "Streamer Mode")} description={l("Скрывать чувствительные данные аккаунта.", "Hide sensitive account details in account settings.")} checked={settings.streamerMode} onChange={(value) => setSetting("streamerMode", value)}/></div>;
 }
 
 function LanguageSettings() {
@@ -1047,8 +1048,29 @@ function AccountSettings({ openProfile }: { openProfile: () => void }) {
   const streamerMode = useMoonStore((s) => s.userSettings.streamerMode);
   const developerMode = useMoonStore((s) => s.userSettings.developerMode);
   const l = useL();
+  const [passwordResetBusy, setPasswordResetBusy] = useState(false);
   const gradient = currentUser.profileGradient ?? { from: "#5865f2", to: "#7c3aed", angle: 135 };
-  return <><div className="account-card" style={{ background: `linear-gradient(${gradient.angle}deg,${gradient.from},${gradient.to})` }}><BannerMedia className="account-banner" src={currentUser.banner}/><div className="account-info"><Avatar label={currentUser.avatar} status="online" large/><h2><NameStyle user={currentUser}>{currentUser.displayName}</NameStyle><UserBadges user={currentUser}/></h2><p>@{currentUser.username}</p><button className="primary-button small" onClick={openProfile}>{l("Редактировать профиль", "Edit User Profile")}</button></div></div>{developerMode && <div className="settings-panel"><strong>USER ID</strong><span>{streamerMode ? l("Скрыто режимом стримера", "Hidden by Streamer Mode") : currentUser.id}</span><button onClick={() => navigator.clipboard?.writeText(currentUser.id ?? "")}>{l("Копировать", "Copy")}</button></div>}<div className="settings-panel"><strong>{l("СЕССИЯ", "SESSION")}</strong><span>{l("Этот локальный аккаунт активен только в текущей вкладке браузера.", "This local account is active only in this browser tab.")}</span><button className="danger-text" onClick={() => window.dispatchEvent(new Event("moon:logout"))}>{l("Выйти", "Log Out")}</button></div></>;
+  const resetPassword = async () => {
+    if (passwordResetBusy) return;
+    setPasswordResetBusy(true);
+    try {
+      const supabase = getSupabaseBrowserClient();
+      if (!supabase) throw new Error("Supabase is not configured.");
+      const { data, error: userError } = await supabase.auth.getUser();
+      if (userError) throw userError;
+      const email = data.user?.email;
+      if (!email) throw new Error(l("У аккаунта не найден email.", "No email was found for this account."));
+      const { error } = await supabase.auth.resetPasswordForEmail(email);
+      if (error) throw error;
+      sessionStorage.setItem("moon:auth-recovery-email", email);
+      sessionStorage.setItem("moon:auth-open-recovery", "1");
+      await supabase.auth.signOut();
+    } catch (error) {
+      alert(error instanceof Error ? error.message : l("Не удалось отправить код сброса пароля.", "Could not send the password reset code."));
+      setPasswordResetBusy(false);
+    }
+  };
+  return <><div className="account-card" style={{ background: `linear-gradient(${gradient.angle}deg,${gradient.from},${gradient.to})` }}><BannerMedia className="account-banner" src={currentUser.banner}/><div className="account-info"><Avatar label={currentUser.avatar} status="online" large/><h2><NameStyle user={currentUser}>{currentUser.displayName}</NameStyle><UserBadges user={currentUser}/></h2><p>@{currentUser.username}</p><button className="primary-button small" onClick={openProfile}>{l("Редактировать профиль", "Edit User Profile")}</button></div></div>{developerMode && <div className="settings-panel"><strong>USER ID</strong><span>{streamerMode ? l("Скрыто режимом стримера", "Hidden by Streamer Mode") : currentUser.id}</span><button onClick={() => navigator.clipboard?.writeText(currentUser.id ?? "")}>{l("Копировать", "Copy")}</button></div>}<div className="settings-panel"><strong>{l("СЕССИЯ", "SESSION")}</strong><span>{l("Сессия защищена Supabase Auth и сохраняется в браузере.", "This session is protected by Supabase Auth and persisted in the browser.")}</span><div className="account-session-actions"><button onClick={() => void resetPassword()} disabled={passwordResetBusy}>{passwordResetBusy ? l("Отправляем код…", "Sending code…") : l("Сбросить пароль", "Reset password")}</button><button className="danger-text" onClick={() => window.dispatchEvent(new Event("moon:logout"))}>{l("Выйти", "Log Out")}</button></div></div></>;
 }
 
 function SidePanelOverlay({ panel, close, searchQuery, setSearchQuery, targetId }: { panel: Exclude<SidePanel, null>; close: () => void; searchQuery: string; setSearchQuery: (v: string) => void; targetId: string }) {
@@ -1090,7 +1112,7 @@ export function MoonApp() {
   const openSearch = (value: string) => { setSearchQuery(value); setPanel("search"); };
   const openSettings = (page = "My Account") => { setSettingsInitialPage(page); setModal("settings"); };
 
-  useEffect(() => startLocalRealtimeSync(), []);
+  useEffect(() => startSupabaseRealtimeSync(), []);
   useEffect(() => { const code = new URLSearchParams(window.location.search).get("invite"); if (code) setPendingInviteCode(code); }, []);
   useEffect(() => {
     const visible = servers.filter((server) => server.ownerId === currentUser.id || server.memberIds?.includes(currentUser.id ?? ""));

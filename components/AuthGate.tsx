@@ -1,18 +1,8 @@
 "use client";
 
-import { type ClipboardEvent, FormEvent, KeyboardEvent, useEffect, useMemo, useRef, useState } from "react";
+import { type ClipboardEvent, FormEvent, KeyboardEvent, useEffect, useRef, useState } from "react";
 import { ArrowLeft, Languages, LoaderCircle, LockKeyhole, Mail, RotateCcw, UserRound } from "lucide-react";
 import { APP_NAME, withBasePath } from "@/lib/config";
-import {
-  accountToCurrentUser,
-  clearLocalSession,
-  getLocalAccounts,
-  getLocalSession,
-  loginLocalAccount,
-  migrateLegacyInlineMedia,
-  normalizeUsername,
-  registerLocalAccount,
-} from "@/lib/local-auth";
 import { useMoonStore, type CurrentUser } from "@/lib/store";
 import { getSupabaseBrowserClient, isSupabaseConfigured } from "@/lib/supabase/client";
 import { getMyRemoteProfile, profileToCurrentUser, validateRemoteUsername } from "@/lib/supabase/profile";
@@ -94,29 +84,15 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
       };
     }
 
-    // Fallback for development when Supabase env variables are missing.
-    const session = getLocalSession();
-    setBackendMode("local");
-    if (session) {
-      setCurrentUser(accountToCurrentUser(session));
-      setState("authenticated");
-    } else {
-      setState("guest");
-    }
-    const migrationTimer = window.setTimeout(() => {
-      void migrateLegacyInlineMedia().catch(() => undefined);
-    }, 250);
-    const onLogout = () => { clearLocalSession(); setState("guest"); };
-    window.addEventListener("moon:logout", onLogout);
-    return () => {
-      cancelled = true;
-      window.clearTimeout(migrationTimer);
-      window.removeEventListener("moon:logout", onLogout);
-    };
+    // Moon is cloud-only now. Never create browser-only accounts when the backend
+    // configuration is unavailable; surface a real configuration error instead.
+    setBackendMode("online");
+    setState("guest");
+    return () => { cancelled = true; };
   }, [setBackendMode, setCurrentUser]);
 
-  if (state === "checking") return <div className="auth-loading"><LoaderCircle size={30} className="spin"/><strong>{APP_NAME}</strong><span>{isSupabaseConfigured() ? "Connecting to Moon…" : "Loading local profile…"}</span></div>;
-  if (state === "guest") return <AuthScreen onAuthenticated={(user) => { setCurrentUser(user); setBackendMode(isSupabaseConfigured() ? "online" : "local"); setState("authenticated"); }} />;
+  if (state === "checking") return <div className="auth-loading"><LoaderCircle size={30} className="spin"/><strong>{APP_NAME}</strong><span>Подключение к Moon…</span></div>;
+  if (state === "guest") return <AuthScreen onAuthenticated={(user) => { setCurrentUser(user); setBackendMode("online"); setState("authenticated"); }} />;
   return <>{children}</>;
 }
 
@@ -171,9 +147,9 @@ function OtpCodeInput({ value, onChange, disabled = false }: { value: string; on
 
 function AuthScreen({ onAuthenticated }: { onAuthenticated: (user: CurrentUser) => void }) {
   const remote = isSupabaseConfigured();
-  const hasAccounts = useMemo(() => remote || getLocalAccounts().length > 0, [remote]);
-  const recoveryPending = remote && typeof window !== "undefined" && sessionStorage.getItem(RECOVERY_PENDING_KEY) === "1";
-  const [mode, setMode] = useState<Mode>(recoveryPending ? "reset-password" : remote ? "login" : hasAccounts ? "login" : "register");
+  const recoveryPending = typeof window !== "undefined" && sessionStorage.getItem(RECOVERY_PENDING_KEY) === "1";
+  const recoveryOpen = typeof window !== "undefined" && sessionStorage.getItem("moon:auth-open-recovery") === "1";
+  const [mode, setMode] = useState<Mode>(recoveryPending ? "reset-password" : recoveryOpen ? "verify-recovery" : "login");
   const [lang, setLang] = useState<Lang>(() => typeof window !== "undefined" && localStorage.getItem(AUTH_LANG_KEY) === "en" ? "en" : "ru");
   const [login, setLogin] = useState("");
   const [email, setEmail] = useState("");
@@ -189,6 +165,10 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: (user: CurrentUser) 
   const [busy, setBusy] = useState(false);
   const [resendSeconds, setResendSeconds] = useState(0);
   const l = (ru: string, en: string) => lang === "ru" ? ru : en;
+
+  useEffect(() => {
+    if (typeof window !== "undefined") sessionStorage.removeItem("moon:auth-open-recovery");
+  }, []);
 
   useEffect(() => {
     if (resendSeconds <= 0) return;
@@ -222,7 +202,11 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: (user: CurrentUser) 
     if (!/^\S+@\S+\.\S+$/.test(cleanEmail)) throw new Error(l("Введи корректный email.", "Enter a valid email address."));
 
     const { data: availableData, error: availableError } = await supabase.rpc("moon_username_available", { candidate: validation.username });
-    if (!availableError && availableData === false) throw new Error(l("Этот username уже занят.", "This username is already taken."));
+    if (availableError) throw new Error(l(
+      `База Moon не готова: ${availableError.message}. Выполни supabase/schema.sql в Supabase SQL Editor.`,
+      `Moon database is not ready: ${availableError.message}. Run supabase/schema.sql in the Supabase SQL Editor.`,
+    ));
+    if (availableData === false) throw new Error(l("Этот username уже занят.", "This username is already taken."));
 
     const { data, error: authError } = await supabase.auth.signUp({
       email: cleanEmail,
@@ -232,9 +216,16 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: (user: CurrentUser) 
     if (authError) throw authError;
 
     if (data.session) {
-      await finishRemoteAuth();
-      return;
+      // Email confirmation is disabled in Supabase. Moon requires email verification
+      // before first login, so sign out and tell the operator what must be enabled.
+      await supabase.auth.signOut();
+      throw new Error(l(
+        "В Supabase отключено подтверждение email. Включи Authentication → Providers → Email → Confirm email, затем зарегистрируй аккаунт снова.",
+        "Email confirmation is disabled in Supabase. Enable Authentication → Providers → Email → Confirm email, then register again.",
+      ));
     }
+
+    if (!data.user) throw new Error(l("Supabase не создал пользователя. Проверь Auth Logs и SMTP.", "Supabase did not create a user. Check Auth Logs and SMTP."));
 
     setVerificationEmail(cleanEmail);
     setOtp("");
@@ -326,33 +317,13 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: (user: CurrentUser) 
     setNotice(l("Пароль изменён. Теперь войди с новым паролем.", "Password changed. You can now log in with your new password."));
   };
 
-  const submitLocal = async () => {
-    if (mode === "login") {
-      onAuthenticated(accountToCurrentUser(loginLocalAccount(login, password)));
-      return;
-    }
-    if (mode !== "register") throw new Error(l("В локальном режиме восстановление по почте недоступно.", "Email recovery is unavailable in local mode."));
-    const normalized = normalizeUsername(username);
-    const normalizedEmail = email.trim().toLowerCase();
-    const localAccounts = getLocalAccounts();
-    if (!normalizedEmail || !/^\S+@\S+\.\S+$/.test(normalizedEmail)) throw new Error(l("Введи корректный email.", "Enter a valid email address."));
-    if (normalized.length < 2) throw new Error(l("Username должен быть минимум 2 символа.", "Username must be at least 2 characters."));
-    if (!displayName.trim()) throw new Error(l("Укажи отображаемое имя.", "Display name is required."));
-    if (password.length < 4) throw new Error(l("Пароль должен быть минимум 4 символа.", "Password must be at least 4 characters."));
-    if (localAccounts.some((account) => account.email === normalizedEmail)) throw new Error(l("Аккаунт с таким email уже есть в этом браузере.", "An account with this email already exists locally."));
-    if (localAccounts.some((account) => account.username === normalized)) throw new Error(l("Этот username уже используется в этом браузере.", "This username is already used locally."));
-    const claimant = `local-user-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
-    const account = registerLocalAccount({ email, username, displayName, password, developer: false, id: claimant });
-    onAuthenticated(accountToCurrentUser(account));
-  };
-
   const submit = async (event: FormEvent) => {
     event.preventDefault();
     setBusy(true);
     clearMessages();
     try {
-      if (!remote) await submitLocal();
-      else if (mode === "login") await loginRemote();
+      if (!remote) throw new Error(l("Не удалось подключиться к Supabase. Обнови страницу или проверь конфигурацию проекта.", "Could not connect to Supabase. Refresh the page or check the project configuration."));
+      if (mode === "login") await loginRemote();
       else if (mode === "register") await registerRemote();
       else if (mode === "verify-signup") await verifySignupCode();
       else if (mode === "forgot") await requestPasswordReset();
@@ -387,7 +358,7 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: (user: CurrentUser) 
     : l("Создай новый пароль", "Create a new password");
 
   const description = mode === "login" ? l("Войди и продолжай общение.", "Log in and continue chatting.")
-    : mode === "register" ? (remote ? l("Аккаунт, друзья, серверы и сообщения сохраняются в облаке.", "Your account, friends, servers and messages are stored in the cloud.") : l("Аккаунт сохраняется только в этом браузере.", "This account is stored only in this browser."))
+    : mode === "register" ? l("Аккаунт, друзья, серверы и сообщения сохраняются в облаке.", "Your account, friends, servers and messages are stored in the cloud.")
     : mode === "verify-signup" ? l(`Мы отправили ${OTP_LENGTH}-значный код на ${verificationEmail}. Введи его ниже, чтобы подтвердить аккаунт.`, `We sent a ${OTP_LENGTH}-digit code to ${verificationEmail}. Enter it below to verify your account.`)
     : mode === "forgot" ? l("Укажи email аккаунта Moon. Мы отправим код для восстановления.", "Enter your Moon account email. We'll send a recovery code.")
     : mode === "verify-recovery" ? l(`Код отправлен на ${resetEmail}.`, `A code was sent to ${resetEmail}.`)
@@ -402,21 +373,21 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: (user: CurrentUser) 
       clearMessages();
       setOtp("");
     }}><ArrowLeft size={16}/>{l("Назад", "Back")}</button>}
-    <div className="auth-brand"><div><img src={withBasePath("/logo.png")} alt="Moon"/></div><span><strong>{APP_NAME}</strong><small>{remote ? "SUPABASE CLOUD" : "LOCAL WEB"}</small></span></div>
+    <div className="auth-brand"><div><img src={withBasePath("/logo.png")} alt="Moon"/></div><span><strong>{APP_NAME}</strong><small>ONLINE</small></span></div>
     <h1>{title}</h1>
     <p>{description}</p>
 
     {mode === "login" && <>
       <label><span>EMAIL</span><div className="auth-input"><Mail size={17}/><input required value={login} onChange={(e) => setLogin(e.target.value)} autoComplete="username" placeholder="you@example.com"/></div></label>
       <label><span>{l("ПАРОЛЬ", "PASSWORD")}</span><div className="auth-input"><LockKeyhole size={17}/><input required value={password} onChange={(e) => setPassword(e.target.value)} type="password" autoComplete="current-password" placeholder={l("Твой пароль", "Your password")}/></div></label>
-      {remote && <button type="button" className="auth-forgot" onClick={() => { setResetEmail(login.trim()); goTo("forgot"); }}>{l("Забыли пароль?", "Forgot your password?")}</button>}
+      <button type="button" className="auth-forgot" onClick={() => { setResetEmail(login.trim()); goTo("forgot"); }}>{l("Сбросить пароль", "Reset password")}</button>
     </>}
 
     {mode === "register" && <>
       <label><span>EMAIL</span><div className="auth-input"><Mail size={17}/><input required value={email} onChange={(e) => setEmail(e.target.value)} type="email" autoComplete="email" placeholder="you@example.com"/></div></label>
       <label><span>{l("ОТОБРАЖАЕМОЕ ИМЯ", "DISPLAY NAME")}</span><div className="auth-input"><UserRound size={17}/><input required value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder={l("Как тебя будут видеть", "How people see you")}/></div></label>
       <label><span>USERNAME</span><div className="auth-input"><UserRound size={17}/><input required value={username} onChange={(e) => setUsername(e.target.value)} autoComplete="username" placeholder="unique_username"/></div></label>
-      <label><span>{l("ПАРОЛЬ", "PASSWORD")}</span><div className="auth-input"><LockKeyhole size={17}/><input required value={password} onChange={(e) => setPassword(e.target.value)} type="password" autoComplete="new-password" placeholder={remote ? l("Минимум 6 символов", "At least 6 characters") : l("Локальный тестовый пароль", "Local test password")}/></div></label>
+      <label><span>{l("ПАРОЛЬ", "PASSWORD")}</span><div className="auth-input"><LockKeyhole size={17}/><input required value={password} onChange={(e) => setPassword(e.target.value)} type="password" autoComplete="new-password" placeholder={l("Минимум 6 символов", "At least 6 characters")}/></div></label>
     </>}
 
     {mode === "forgot" && <label><span>EMAIL</span><div className="auth-input"><Mail size={17}/><input autoFocus required value={resetEmail} onChange={(e) => setResetEmail(e.target.value)} type="email" autoComplete="email" placeholder="you@example.com"/></div></label>}
@@ -437,6 +408,6 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: (user: CurrentUser) 
     <button className="auth-submit" disabled={busy || (isOtp && otp.length !== OTP_LENGTH)}>{busy ? <LoaderCircle className="spin" size={18}/> : mode === "login" ? l("Войти", "Log In") : mode === "register" ? l("Создать аккаунт", "Create Account") : mode === "verify-signup" ? l("Подтвердить аккаунт", "Verify Account") : mode === "forgot" ? l("Отправить код", "Send Code") : mode === "verify-recovery" ? l("Продолжить", "Continue") : l("Сменить пароль", "Change Password")}</button>
 
     {(mode === "login" || mode === "register") && <div className="auth-switch">{mode === "login" ? l("Нет аккаунта?", "Need an account?") : l("Уже есть аккаунт?", "Already have an account?")}<button type="button" onClick={() => { setMode(mode === "login" ? "register" : "login"); clearMessages(); }}>{mode === "login" ? l("Регистрация", "Register") : l("Войти", "Log In")}</button></div>}
-    <div className="demo-credentials">{remote ? l("Cloud mode: Supabase Auth + PostgreSQL + Realtime + Storage.", "Cloud mode: Supabase Auth + PostgreSQL + Realtime + Storage.") : l("Локальный fallback-режим.", "Local fallback mode.")}</div>
+    <div className="demo-credentials">{l("Защищено Supabase Auth · данные синхронизируются в облаке.", "Protected by Supabase Auth · data is synced in the cloud.")}</div>
   </form></main>;
 }

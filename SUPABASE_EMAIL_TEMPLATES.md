@@ -1,69 +1,52 @@
-# Moon — Supabase email codes
+# MoonLobby — Supabase email templates
 
-Moon v0.11.2 uses a manual OTP code for both account confirmation and password recovery.
-No SQL migration is required for this update.
+Moon uses `{{ .Token }}` for both account verification and password recovery.
+Do not replace it with `{{ .ConfirmationURL }}` if you want the code-entry screen.
 
-## 1. Enable email confirmation
+## Confirm signup
 
-Supabase Dashboard → **Authentication → Providers → Email**:
-
-- Email provider: ON
-- Confirm email: ON
-
-## 2. Confirm signup template
-
-Supabase Dashboard → **Authentication → Email Templates → Confirm signup**.
-
-Subject:
-
-```text
-Moon — код подтверждения
-```
-
-Body:
+**Subject:** `Код подтверждения MoonLobby`
 
 ```html
-<div style="font-family:Arial,sans-serif;background:#111214;color:#f2f3f5;padding:32px">
-  <div style="max-width:520px;margin:auto;background:#1e1f22;border-radius:14px;padding:28px">
-    <h2 style="margin:0 0 12px">Подтверждение аккаунта Moon</h2>
-    <p style="color:#b5bac1">Введите этот код в Moon:</p>
-    <div style="font-size:34px;font-weight:800;letter-spacing:10px;color:#fff;background:#2b2d31;border-radius:10px;padding:18px;text-align:center">{{ .Token }}</div>
-    <p style="font-size:12px;color:#949ba4;margin-top:18px">Если вы не создавали аккаунт Moon, просто проигнорируйте письмо.</p>
+<div style="margin:0;padding:40px 16px;background:#0f1014;font-family:Arial,Helvetica,sans-serif;color:#ffffff;">
+  <div style="max-width:520px;margin:0 auto;background:#18191f;border:1px solid #262832;border-radius:18px;padding:38px 34px;text-align:center;">
+    <img src="https://roblozgg-collab.github.io/moon-web/logo.png" alt="MoonLobby" width="78" height="78" style="display:block;margin:0 auto 18px;border-radius:18px;">
+    <div style="font-size:28px;font-weight:800;letter-spacing:-1px;margin-bottom:8px;">MoonLobby</div>
+    <div style="font-size:14px;color:#949ba4;margin-bottom:32px;">Подтверждение аккаунта</div>
+    <h1 style="font-size:22px;margin:0 0 14px;color:#f2f3f5;">Добро пожаловать в MoonLobby</h1>
+    <p style="font-size:15px;line-height:23px;color:#b5bac1;margin:0 0 28px;">Остался всего один шаг. Введите код ниже в приложении, чтобы подтвердить вашу электронную почту.</p>
+    <div style="background:#111216;border:1px solid #30323d;border-radius:14px;padding:22px 16px;margin:0 0 28px;font-size:36px;line-height:42px;font-weight:800;letter-spacing:12px;color:#ffffff;">{{ .Token }}</div>
+    <p style="font-size:13px;line-height:20px;color:#7d828d;margin:0 0 26px;">Никому не сообщайте этот код. Сотрудники MoonLobby никогда не попросят вас назвать его.</p>
+    <div style="height:1px;background:#262832;margin:0 0 24px;"></div>
+    <p style="font-size:12px;line-height:18px;color:#666b75;margin:0;">Если вы не создавали аккаунт MoonLobby, просто проигнорируйте это письмо.</p>
   </div>
+  <div style="text-align:center;font-size:11px;color:#50545d;margin-top:18px;">© MoonLobby</div>
 </div>
 ```
 
-Important: the template must contain `{{ .Token }}`. Moon verifies it with Supabase Auth.
+## Reset password
 
-## 3. Reset password template
-
-Supabase Dashboard → **Authentication → Email Templates → Reset password**.
-
-Subject:
-
-```text
-Moon — восстановление пароля
-```
-
-Body:
+**Subject:** `Сброс пароля MoonLobby`
 
 ```html
-<div style="font-family:Arial,sans-serif;background:#111214;color:#f2f3f5;padding:32px">
-  <div style="max-width:520px;margin:auto;background:#1e1f22;border-radius:14px;padding:28px">
-    <h2 style="margin:0 0 12px">Восстановление пароля Moon</h2>
-    <p style="color:#b5bac1">Введите этот код в Moon, чтобы задать новый пароль:</p>
-    <div style="font-size:34px;font-weight:800;letter-spacing:10px;color:#fff;background:#2b2d31;border-radius:10px;padding:18px;text-align:center">{{ .Token }}</div>
-    <p style="font-size:12px;color:#949ba4;margin-top:18px">Если вы не запрашивали восстановление пароля, проигнорируйте письмо.</p>
+<div style="margin:0;padding:40px 16px;background:#0f1014;font-family:Arial,Helvetica,sans-serif;color:#ffffff;">
+  <div style="max-width:520px;margin:0 auto;background:#18191f;border:1px solid #262832;border-radius:18px;padding:38px 34px;text-align:center;">
+    <img src="https://roblozgg-collab.github.io/moon-web/logo.png" alt="MoonLobby" width="78" height="78" style="display:block;margin:0 auto 18px;border-radius:18px;">
+    <div style="font-size:28px;font-weight:800;letter-spacing:-1px;margin-bottom:8px;">MoonLobby</div>
+    <div style="font-size:14px;color:#949ba4;margin-bottom:32px;">Восстановление доступа</div>
+    <h1 style="font-size:22px;margin:0 0 14px;color:#f2f3f5;">Сброс пароля</h1>
+    <p style="font-size:15px;line-height:23px;color:#b5bac1;margin:0 0 28px;">Введите этот код в MoonLobby, чтобы установить новый пароль.</p>
+    <div style="background:#111216;border:1px solid #30323d;border-radius:14px;padding:22px 16px;margin:0 0 28px;font-size:36px;line-height:42px;font-weight:800;letter-spacing:12px;color:#ffffff;">{{ .Token }}</div>
+    <p style="font-size:13px;line-height:20px;color:#7d828d;margin:0 0 26px;">Никому не сообщайте этот код. Если вы не запрашивали сброс пароля, просто проигнорируйте письмо.</p>
+    <div style="height:1px;background:#262832;margin:0 0 24px;"></div>
+    <p style="font-size:12px;line-height:18px;color:#666b75;margin:0;">Безопасность аккаунта MoonLobby</p>
   </div>
+  <div style="text-align:center;font-size:11px;color:#50545d;margin-top:18px;">© MoonLobby</div>
 </div>
 ```
 
-Do not replace `{{ .Token }}` with `{{ .ConfirmationURL }}` if you want Moon's code-entry screen.
+## Required settings
 
-## 4. GitHub Pages URL
-
-After GitHub Pages is deployed, set your site address under:
-
-**Supabase → Authentication → URL Configuration**.
-
-This update does not require changing `schema.sql` or environment variables.
+- Authentication → Providers → Email → **Confirm email: ON**
+- Authentication → SMTP Settings → configure custom SMTP for public delivery
+- Authentication → URL Configuration → Site URL: `https://roblozgg-collab.github.io/moon-web/`
