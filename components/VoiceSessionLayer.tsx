@@ -46,8 +46,7 @@ export function VoiceSessionLayer() {
 
   useEffect(() => {
     const supabase = getSupabaseBrowserClient();
-    const userId = currentUser.id;
-    if (!joinedVoiceId || !userId || !supabase || !navigator.mediaDevices?.getUserMedia) {
+    if (!joinedVoiceId || !currentUser.id || !supabase) {
       setVoiceConnection("disconnected");
       setVoicePeers([]);
       return;
@@ -59,12 +58,12 @@ export function VoiceSessionLayer() {
     let local!: MediaStream;
     let cameraStream: MediaStream | null = null;
     let screenStream: MediaStream | null = null;
-    const channel = supabase.channel(`moon-voice:${joinedVoiceId}`, { config: { presence: { key: userId }, broadcast: { self: false } } });
+    const channel = supabase.channel(`moon-voice:${joinedVoiceId}`, { config: { presence: { key: currentUser.id }, broadcast: { self: false } } });
 
-    const localPeer = (): VoicePeer => ({ id: userId, name: currentUser.displayName, username: currentUser.username, avatar: currentUser.avatar, muted: useMoonStore.getState().muted, deafened: useMoonStore.getState().deafened, camera: useMoonStore.getState().cameraEnabled, screen: useMoonStore.getState().screenShareEnabled });
+    const localPeer = (): VoicePeer => ({ id: currentUser.id!, name: currentUser.displayName, username: currentUser.username, avatar: currentUser.avatar, muted: useMoonStore.getState().muted, deafened: useMoonStore.getState().deafened, camera: useMoonStore.getState().cameraEnabled, screen: useMoonStore.getState().screenShareEnabled });
     const currentVideoTrack = () => { const session = sessionRef.current; return session?.screenStream?.getVideoTracks()[0] ?? (useMoonStore.getState().cameraEnabled ? session?.cameraStream?.getVideoTracks()[0] ?? null : null); };
     const emit = (toId: string, payload: Omit<VoiceSignal, "id" | "roomId" | "fromId" | "toId">) => {
-      void channel.send({ type: "broadcast", event: "voice-signal", payload: { roomId: joinedVoiceId, id: `vs-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, fromId: userId, toId, ...payload } satisfies VoiceSignal });
+      void channel.send({ type: "broadcast", event: "voice-signal", payload: { roomId: joinedVoiceId, id: `vs-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, fromId: currentUser.id, toId, ...payload } satisfies VoiceSignal });
     };
 
     const updatePeerSpeaking = (id: string, speaking: boolean) => {
@@ -89,7 +88,7 @@ export function VoiceSessionLayer() {
     const publishPresence = async () => {
       if (disposed) return;
       const state = useMoonStore.getState();
-      await channel.track({ userId: userId, name: state.currentUser.displayName, username: state.currentUser.username, avatar: state.currentUser.avatar, muted: state.muted, deafened: state.deafened, camera: state.cameraEnabled, screen: state.screenShareEnabled, joinedAt: Date.now() });
+      await channel.track({ userId: currentUser.id, name: state.currentUser.displayName, username: state.currentUser.username, avatar: state.currentUser.avatar, muted: state.muted, deafened: state.deafened, camera: state.cameraEnabled, screen: state.screenShareEnabled, joinedAt: Date.now() });
     };
 
     const offer = async (peerId: string, bundle: PeerBundle) => {
@@ -137,22 +136,22 @@ export function VoiceSessionLayer() {
       const remotePeers: VoicePeer[] = [];
       for (const entries of Object.values(state)) for (const entry of entries ?? []) {
         const id = String(entry.userId ?? "");
-        if (!id || id === userId || seen.has(id)) continue;
+        if (!id || id === currentUser.id || seen.has(id)) continue;
         seen.add(id);
         const old = useMoonStore.getState().voicePeers.find((peer) => peer.id === id);
         remotePeers.push({ id, name: String(entry.name ?? "User"), username: entry.username ? String(entry.username) : undefined, avatar: String(entry.avatar ?? "?"), muted: Boolean(entry.muted), deafened: Boolean(entry.deafened), camera: Boolean(entry.camera), screen: Boolean(entry.screen), speaking: old?.speaking });
         const bundle = ensurePeer(id);
-        if (userId < id && bundle.pc.signalingState === "stable" && bundle.pc.connectionState !== "connected") window.setTimeout(() => void offer(id, bundle), 250);
+        if (currentUser.id! < id && bundle.pc.signalingState === "stable" && bundle.pc.connectionState !== "connected") window.setTimeout(() => void offer(id, bundle), 250);
       }
       for (const [id, bundle] of peers) if (!seen.has(id)) { bundle.pc.close(); bundle.audio.pause(); peers.delete(id); remoteStreams.delete(id); }
-      const me = useMoonStore.getState().voicePeers.find((peer) => peer.id === userId);
+      const me = useMoonStore.getState().voicePeers.find((peer) => peer.id === currentUser.id);
       setVoicePeers([{ ...localPeer(), speaking: me?.speaking }, ...remotePeers]);
       mediaChanged();
     };
 
     const onSignal = async ({ payload }: any) => {
       const signal = payload as VoiceSignal;
-      if (!signal || signal.roomId !== joinedVoiceId || signal.toId !== userId || signal.fromId === userId) return;
+      if (!signal || signal.roomId !== joinedVoiceId || signal.toId !== currentUser.id || signal.fromId === currentUser.id) return;
       const bundle = ensurePeer(signal.fromId);
       try {
         if (signal.type === "offer" && signal.sdp) {
@@ -170,18 +169,28 @@ export function VoiceSessionLayer() {
     };
 
     const start = async () => {
-      try {
-        local = await navigator.mediaDevices.getUserMedia({ audio: inputDeviceId !== "default" ? { deviceId: { exact: inputDeviceId } } : true, video: false });
-      } catch {
-        setVoiceConnection("failed");
-        useMoonStore.getState().toggleVoice(joinedVoiceId);
-        return;
+      // A saved device id can become invalid after reconnecting a headset or
+      // changing browser permissions. First try the selected input, then the
+      // browser default. If microphone access is unavailable entirely, stay in
+      // the room receive-only instead of immediately kicking the user out.
+      local = new MediaStream();
+      if (navigator.mediaDevices?.getUserMedia) {
+        const preferred = inputDeviceId && inputDeviceId !== "default";
+        try {
+          local = await navigator.mediaDevices.getUserMedia({ audio: preferred ? { deviceId: { exact: inputDeviceId } } : true, video: false });
+        } catch {
+          if (preferred) {
+            try { local = await navigator.mediaDevices.getUserMedia({ audio: true, video: false }); }
+            catch { local = new MediaStream(); }
+          } else local = new MediaStream();
+        }
       }
       if (disposed) { local.getTracks().forEach((track) => track.stop()); return; }
+      if (!local.getAudioTracks().length && !useMoonStore.getState().muted) useMoonStore.setState({ muted: true });
       local.getAudioTracks().forEach((track) => { track.enabled = !useMoonStore.getState().muted; });
       localPreviewStream = local; mediaChanged();
       sessionRef.current = { channel, local, cameraStream, screenStream, peers, stopped: false, speakingCleanup };
-      watchSpeaking(userId, local);
+      watchSpeaking(currentUser.id!, local);
       channel.on("presence", { event: "sync" }, syncPresence).on("presence", { event: "join" }, syncPresence).on("presence", { event: "leave" }, syncPresence).on("broadcast", { event: "voice-signal" }, onSignal).subscribe(async (status: string) => {
         if (status === "SUBSCRIBED") { await publishPresence(); setVoiceConnection("connected"); syncPresence(); }
         if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") setVoiceConnection("failed");

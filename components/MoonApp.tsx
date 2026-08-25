@@ -70,7 +70,7 @@ import { getSupabaseBrowserClient } from "@/lib/supabase/client";
 import { uploadLocalImage } from "@/lib/media";
 import { hasServerPermission, type HomeTab, type MoonTheme, useMoonStore } from "@/lib/store";
 import { VoiceSessionLayer, getVoiceLocalStream, getVoiceRemoteStream } from "@/components/VoiceSessionLayer";
-import { navigateMoon, parseMoonRoute, SETTINGS_PAGES, SETTINGS_SLUGS } from "@/lib/routes";
+import { consumePendingMoonRoutePath, getLastMoonRoutePath, MOON_ROUTE_EVENT, navigateMoon, navigateMoonUrl, parseMoonRoute, rememberCurrentMoonRoute, SETTINGS_PAGES, SETTINGS_SLUGS } from "@/lib/routes";
 
 type Modal = null | "server" | "channel" | "settings" | "invite" | "serverSettings" | "editServer";
 type SidePanel = null | "pins" | "inbox" | "search";
@@ -105,11 +105,10 @@ function useL() {
 }
 
 function UserBadges({ user }: { user: Pick<Member, "plus" | "plusBadgeVisible" | "developer"> | { plus?: boolean; plusBadgeVisible?: boolean; developer?: boolean } }) {
-  const openHome = useMoonStore((s) => s.openHome);
   const setHomeTab = useMoonStore((s) => s.setHomeTab);
   const l = useL();
   const [tooltip, setTooltip] = useState<{ text: string; x: number; y: number } | null>(null);
-  const openPlus = () => { openHome(); setHomeTab("plus"); };
+  const openPlus = () => { setHomeTab("plus"); };
   const showTooltip = (event: ReactMouseEvent<HTMLElement>, text: string) => {
     const rect = event.currentTarget.getBoundingClientRect();
     setTooltip({ text, x: rect.left + rect.width / 2, y: rect.top - 8 });
@@ -324,7 +323,7 @@ function ChannelSidebar({ openChannelModal, openInviteModal, openServerSettings,
     <div className="server-title-wrap"><button className="server-title" onClick={() => setServerMenu((v) => !v)}><span>{server.name}</span><ChevronDown size={18} className={serverMenu ? "rotated" : ""}/></button>{serverMenu && <div className="server-dropdown" onMouseLeave={() => setServerMenu(false)}><button onClick={() => { setServerMenu(false); openInviteModal(); }}><UserPlus size={16}/> Invite People</button>{isOwner && <button onClick={() => { setServerMenu(false); openChannelModal(); }}><Plus size={16}/> Create Channel</button>}{isOwner && <button onClick={() => { setServerMenu(false); openServerSettings(); }}><Settings size={16}/> Server Settings</button>}</div>}</div>
     <div className="channel-scroll">
       <ChannelCategory title={l("ТЕКСТОВЫЕ КАНАЛЫ", "TEXT CHANNELS")} collapsed={collapsed.text} onToggle={() => setCollapsed((s) => ({ ...s, text: !s.text }))} onAdd={openChannelModal}>{textChannels.map((channel) => <button key={channel.id} onClick={() => setActiveChannel(channel.id)} className={`channel-item ${activeChannelId === channel.id ? "active" : ""}`}><Hash size={18}/><span>{channel.name}</span></button>)}</ChannelCategory>
-      <ChannelCategory title={l("ГОЛОСОВЫЕ КАНАЛЫ", "VOICE CHANNELS")} collapsed={collapsed.voice} onToggle={() => setCollapsed((s) => ({ ...s, voice: !s.voice }))} onAdd={openChannelModal}>{voiceChannels.map((channel) => <div className="voice-channel-block" key={channel.id}><button onClick={() => setActiveChannel(channel.id)} className={`channel-item ${activeChannelId === channel.id ? "active" : ""}`}><Speaker size={18}/><span>{channel.name}</span>{joinedVoiceId === channel.id && <span className="voice-live">LIVE</span>}</button>{joinedVoiceId === channel.id && <div className="voice-channel-members">{voicePeers.map((peer)=><button key={peer.id} onClick={() => window.dispatchEvent(new CustomEvent("moon:open-profile",{detail:{memberId:peer.id}}))}><Avatar label={peer.avatar}/><span>{peer.name}</span>{peer.screen&&<MonitorUp size={12}/>} {peer.muted&&<MicOff size={12}/>}</button>)}</div>}</div>)}</ChannelCategory>
+      <ChannelCategory title={l("ГОЛОСОВЫЕ КАНАЛЫ", "VOICE CHANNELS")} collapsed={collapsed.voice} onToggle={() => setCollapsed((s) => ({ ...s, voice: !s.voice }))} onAdd={openChannelModal}>{voiceChannels.map((channel) => <div className="voice-channel-block" key={channel.id}><button onClick={() => { setActiveChannel(channel.id); if (joinedVoiceId !== channel.id) toggleVoice(channel.id); }} className={`channel-item ${activeChannelId === channel.id ? "active" : ""}`}><Speaker size={18}/><span>{channel.name}</span>{joinedVoiceId === channel.id && <span className="voice-live">LIVE</span>}</button>{joinedVoiceId === channel.id && <div className="voice-channel-members">{voicePeers.map((peer)=><button key={peer.id} onClick={() => window.dispatchEvent(new CustomEvent("moon:open-profile",{detail:{memberId:peer.id}}))}><Avatar label={peer.avatar}/><span>{peer.name}</span>{peer.screen&&<MonitorUp size={12}/>} {peer.muted&&<MicOff size={12}/>}</button>)}</div>}</div>)}</ChannelCategory>
       {!textChannels.length && !voiceChannels.length && <div className="sidebar-empty"><Hash size={24}/><span>{l("Каналов пока нет", "No channels yet")}</span>{isOwner && <button onClick={openChannelModal}>{l("Создать канал", "Create Channel")}</button>}</div>}
     </div>
     <VoiceConnectionPanel/>
@@ -709,7 +708,7 @@ function VoiceRoom({ channelId, name }: { channelId: string; name: string }) {
   const visiblePeers = joined ? peers : [];
   return <div className={`voice-room-v2 ${joined ? "joined" : ""}`}>
     {!joined ? <div className="voice-room-empty"><div className="voice-orb"><Speaker size={44}/></div><h1>{name}</h1><p>{l("Зайди в голосовой канал, чтобы говорить, включать камеру и демонстрацию экрана.", "Join the voice channel to talk, use camera and share your screen.")}</p><button className="primary-button" onClick={() => toggleVoice(channelId)}>{l("Подключиться к голосовому", "Join Voice")}</button></div> : <>
-      <div className="server-voice-topbar"><div><strong>{name}</strong><span className={`call-connection ${connection === "connected" ? "connected" : connection === "failed" ? "failed" : "connecting"}`}><i/>{connection === "connected" ? l("Голос подключён", "Voice connected") : connection === "failed" ? l("Ошибка соединения", "Connection failed") : l("Подключение…", "Connecting…")}</span></div><small>{l("Потяни нижний край, чтобы изменить размер звонка", "Drag the bottom edge to resize the call")}</small></div>
+      <div className="server-voice-topbar"><div><strong>{name}</strong><span className={`call-connection ${connection === "connected" ? "connected" : connection === "failed" ? "failed" : "connecting"}`}><i/>{connection === "connected" ? l("Голос подключён", "Voice connected") : connection === "failed" ? l("Ошибка соединения", "Connection failed") : l("Подключение…", "Connecting…")}</span></div></div>
       <div className="server-voice-stage">{visiblePeers.length ? visiblePeers.map((peer) => <VoiceVideoTile key={peer.id} peer={peer} local={peer.id === currentUser.id}/>) : <div className="voice-waiting"><Speaker size={42}/><strong>{l("Подключаем участников…", "Connecting participants…")}</strong></div>}</div>
       <div className="server-voice-controls"><button className={muted ? "active" : ""} onClick={toggleMute}>{muted ? <MicOff size={20}/> : <Mic size={20}/>}</button><button className={deafened ? "active" : ""} onClick={toggleDeafen}>{deafened ? <VolumeX size={20}/> : <Headphones size={20}/>}</button><button className={camera ? "active" : ""} onClick={() => setCamera(!camera)}>{camera ? <Video size={20}/> : <VideoOff size={20}/>}</button><button className={screen ? "active screen-active" : ""} onClick={() => setScreen(!screen)}><MonitorUp size={20}/></button><button className="hangup" onClick={() => toggleVoice(channelId)}><PhoneOff size={20}/></button></div>
     </>}
@@ -1207,8 +1206,14 @@ function AdminPanel() {
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
   const supabase = getSupabaseBrowserClient();
-  const run = async (work: () => Promise<void>) => { setBusy(true); setNote(""); try { await work(); } catch (error) { setNote(readableError(error)); } finally { setBusy(false); } };
-  const refreshBans = async () => { if (!supabase) return; const { data, error } = await supabase.from("moderation_bans").select("id,target_type,target_id,reason,created_at,expires_at,revoked_at").is("revoked_at", null).order("created_at", { ascending: false }).limit(100); if (error) throw new Error(readableError(error)); setBans((data ?? []) as BanRow[]); };
+  const adminError = (error: unknown) => {
+    const text = readableError(error);
+    return /PGRST20[25]|moderation_bans|moon_admin_/i.test(text)
+      ? l(`База Moon не обновлена. Запусти supabase/MIGRATE_V0.12.2.sql в Supabase SQL Editor. ${text}`, `Moon database migration is missing. Run supabase/MIGRATE_V0.12.2.sql in Supabase SQL Editor. ${text}`)
+      : text;
+  };
+  const run = async (work: () => Promise<void>) => { setBusy(true); setNote(""); try { await work(); } catch (error) { setNote(adminError(error)); } finally { setBusy(false); } };
+  const refreshBans = async () => { if (!supabase) return; const { data, error } = await supabase.from("moderation_bans").select("id,target_type,target_id,reason,created_at,expires_at,revoked_at").is("revoked_at", null).order("created_at", { ascending: false }).limit(100); if (error) throw new Error(adminError(error)); setBans((data ?? []) as BanRow[]); };
   const refreshProfile = async (userId: string) => {
     if (!supabase) return;
     const { data, error } = await supabase.from("profiles").select("*").eq("id", userId).maybeSingle();
@@ -1218,7 +1223,7 @@ function AdminPanel() {
     useMoonStore.setState((state) => ({ members: state.members.some((item) => item.id === member.id) ? state.members.map((item) => item.id === member.id ? member : item) : [...state.members, member] }));
     if (userId === currentUser.id) setCurrentUser(profileToCurrentUser(data as any));
   };
-  useEffect(() => { void refreshBans().catch((error) => setNote(readableError(error))); }, []);
+  useEffect(() => { void refreshBans().catch((error) => setNote(adminError(error))); }, []);
   if (!currentUser.developer) return <div className="auth-error">403</div>;
   const rpc = async (name: string, args: Record<string, unknown>) => { if (!supabase) throw new Error("Supabase unavailable"); const { error } = await supabase.rpc(name, args); if (error) throw new Error(readableError(error)); };
   const ban = () => run(async () => { if (!targetId.trim()) throw new Error(l("Укажи ID цели.", "Enter a target ID.")); await rpc("moon_admin_ban", { target_kind: targetType, target: targetId.trim(), reason_text: reason.trim() || null, duration_hours: Math.max(0, Number(duration) || 0) }); setNote(l("Блокировка создана.", "Ban created.")); setTargetId(""); await refreshBans(); });
@@ -1362,12 +1367,8 @@ export function MoonApp() {
     if (typeof window === "undefined") return;
     const target = settingsReturnPath.current;
     settingsReturnPath.current = null;
-    if (target) {
-      window.history.pushState({}, "", target);
-      window.dispatchEvent(new PopStateEvent("popstate"));
-    } else {
-      navigateMoon({ kind: "friends" });
-    }
+    if (target) navigateMoonUrl(target);
+    else navigateMoon({ kind: "friends" });
   };
 
   useEffect(() => startSupabaseRealtimeSync(), []);
@@ -1379,17 +1380,18 @@ export function MoonApp() {
   useEffect(() => {
     const applyRoute = () => {
       const route = parseMoonRoute();
-      const state = useMoonStore.getState();
       if (route.kind !== "settings") setModal((current) => current === "settings" ? null : current);
 
       if (route.kind === "dm") {
-        if (!directMessages.some((dm) => dm.id === route.dmId && dm.participantIds?.includes(currentUser.id ?? ""))) return;
+        const availableDm = directMessages.find((dm) => dm.id === route.dmId && (dm.participantIds?.includes(currentUser.id ?? "") || dm.memberId));
+        if (!availableDm) return;
         useMoonStore.setState((current) => ({
           appView: "home",
           activeDmId: route.dmId,
           replyingToId: null,
           directMessages: current.directMessages.map((dm) => dm.id === route.dmId ? { ...dm, unread: 0, hiddenFor: (dm.hiddenFor ?? []).filter((id) => id !== current.currentUser.id) } : dm),
         }));
+        rememberCurrentMoonRoute();
         return;
       }
 
@@ -1400,6 +1402,7 @@ export function MoonApp() {
         const selected = requestedChannel ?? server.channels.find((channel) => channel.type === "text") ?? server.channels[0];
         useMoonStore.setState({ appView: "server", activeServerId: server.id, activeChannelId: selected?.id ?? "", activeDmId: null, replyingToId: null });
         if (!route.channelId && selected) navigateMoon({ kind: "server", serverId: server.id, channelId: selected.id }, true);
+        else rememberCurrentMoonRoute();
         return;
       }
 
@@ -1407,11 +1410,13 @@ export function MoonApp() {
         const page = SETTINGS_PAGES[route.page ?? "account"] ?? "My Account";
         setSettingsInitialPage(page);
         setModal("settings");
+        rememberCurrentMoonRoute();
         return;
       }
 
       if (route.kind === "plus") {
         useMoonStore.setState({ appView: "home", activeDmId: null, homeTab: "plus", replyingToId: null });
+        rememberCurrentMoonRoute();
         return;
       }
 
@@ -1419,11 +1424,34 @@ export function MoonApp() {
       const tab = route.kind === "friends" && route.tab && allowedTabs.includes(route.tab as HomeTab) ? route.tab as HomeTab : "online";
       useMoonStore.setState({ appView: "home", activeDmId: null, homeTab: tab, replyingToId: null });
       if (route.kind === "home") navigateMoon({ kind: "friends" }, true);
+      else rememberCurrentMoonRoute();
     };
 
-    applyRoute();
+    const pending = consumePendingMoonRoutePath();
+    const currentRoute = parseMoonRoute();
+    if (pending) {
+      navigateMoonUrl(pending, true);
+      applyRoute();
+    } else if (currentRoute.kind === "home" && !window.location.search) {
+      const last = getLastMoonRoutePath();
+      const lastPathname = last?.split(/[?#]/, 1)[0];
+      if (last && lastPathname && parseMoonRoute(lastPathname).kind !== "home") {
+        navigateMoonUrl(last, true);
+        applyRoute();
+      } else applyRoute();
+    } else applyRoute();
+
+    const onVisible = () => { if (document.visibilityState === "visible") applyRoute(); };
     window.addEventListener("popstate", applyRoute);
-    return () => window.removeEventListener("popstate", applyRoute);
+    window.addEventListener(MOON_ROUTE_EVENT, applyRoute);
+    window.addEventListener("pageshow", applyRoute);
+    document.addEventListener("visibilitychange", onVisible);
+    return () => {
+      window.removeEventListener("popstate", applyRoute);
+      window.removeEventListener(MOON_ROUTE_EVENT, applyRoute);
+      window.removeEventListener("pageshow", applyRoute);
+      document.removeEventListener("visibilitychange", onVisible);
+    };
   }, [servers, directMessages, currentUser.id, bannedServerIds]);
 
   useEffect(() => {
@@ -1459,12 +1487,12 @@ export function MoonApp() {
   }, [servers, currentUser.id, activeServerId, setActiveServer, bannedServerIds]);
 
   const appStyle = { "--chat-font-size": `${userSettings.chatFontSize}px` } as CSSProperties;
-  return <div className={`moon-app theme-${theme} ${showMemberColumn ? "" : "no-members"} ${userSettings.compactMessages ? "compact-messages" : ""} ${userSettings.reducedMotion ? "reduce-motion" : ""}`} style={appStyle}>
+  return <div className={`moon-app theme-${theme} ${showMemberColumn ? "" : "no-members"} ${userSettings.compactMessages ? "compact-messages" : ""} ${userSettings.reducedMotion ? "reduce-motion" : ""} ${modal === "settings" ? "settings-open" : ""}`} style={appStyle}>
     <VoiceSessionLayer/>
     <ServerRail openServerModal={() => setModal("server")} openInviteModal={(serverId) => { useMoonStore.getState().setActiveServer(serverId); setModal("invite"); }} openEditServer={(serverId) => { useMoonStore.getState().setActiveServer(serverId); setModal("editServer"); }} openServerSettings={(serverId) => { useMoonStore.getState().setActiveServer(serverId); setModal("serverSettings"); }}/>
     {appView === "server" && activeServer ? <ChannelSidebar openChannelModal={() => setModal("channel")} openInviteModal={() => setModal("invite")} openServerSettings={() => setModal("serverSettings")} openSettings={openSettings}/> : <HomeSidebar openSettings={openSettings}/>} 
     <section className="main-column">{appView === "home" ? (activeDmId ? <DirectMessageChat dmId={activeDmId}/> : <FriendsScreen/>) : activeServer ? <><ChatHeader openPanel={setPanel} onSearch={openSearch}/>{channel?.type === "voice" ? <VoiceRoom channelId={channel.id} name={channel.name}/> : channel ? <><MessageList targetId={channel.id} title={channel.name}/><Composer targetId={channel.id} placeholder={`Message #${channel.name}`}/></> : <div className="empty-server-main"><Hash size={52}/><h2>No channels yet</h2><p>Create your first channel from the server sidebar.</p></div>}</> : <FriendsScreen/>}</section>
     {showMemberColumn && <MemberSidebar/>}
-    {pendingInviteCode && <InviteAcceptModal code={pendingInviteCode} close={() => { setPendingInviteCode(null); const url = new URL(window.location.href); url.searchParams.delete("invite"); window.history.replaceState({}, "", `${url.pathname}${url.search}`); }}/>} {modal === "server" && <CreateServerModal close={() => setModal(null)}/>} {modal === "channel" && <CreateChannelModal close={() => setModal(null)}/>} {modal === "settings" && <SettingsModal close={closeSettings} initialPage={settingsInitialPage} onPageChange={(page) => navigateMoon({ kind: "settings", page: SETTINGS_SLUGS[page] ?? "account" })}/>} {modal === "invite" && <InviteModal close={() => setModal(null)}/>} {modal === "serverSettings" && <ServerSettingsModal close={() => setModal(null)}/>} {modal === "editServer" && <EditServerModal close={() => setModal(null)}/>} {panel && <SidePanelOverlay panel={panel} close={() => setPanel(null)} searchQuery={searchQuery} setSearchQuery={setSearchQuery} targetId={targetId}/>} {activeCall?.status === "ringing" && activeCall.calleeId === currentUser.id && <IncomingCallToast call={activeCall}/>} {fullProfileId && <FullProfileModal memberId={fullProfileId} close={() => setFullProfileId(null)}/>} 
+    {pendingInviteCode && <InviteAcceptModal code={pendingInviteCode} close={() => { setPendingInviteCode(null); const url = new URL(window.location.href); url.searchParams.delete("invite"); navigateMoonUrl(`${url.pathname}${url.search}`, true); }}/>} {modal === "server" && <CreateServerModal close={() => setModal(null)}/>} {modal === "channel" && <CreateChannelModal close={() => setModal(null)}/>} {modal === "settings" && <SettingsModal close={closeSettings} initialPage={settingsInitialPage} onPageChange={(page) => navigateMoon({ kind: "settings", page: SETTINGS_SLUGS[page] ?? "account" })}/>} {modal === "invite" && <InviteModal close={() => setModal(null)}/>} {modal === "serverSettings" && <ServerSettingsModal close={() => setModal(null)}/>} {modal === "editServer" && <EditServerModal close={() => setModal(null)}/>} {panel && <SidePanelOverlay panel={panel} close={() => setPanel(null)} searchQuery={searchQuery} setSearchQuery={setSearchQuery} targetId={targetId}/>} {activeCall?.status === "ringing" && activeCall.calleeId === currentUser.id && <IncomingCallToast call={activeCall}/>} {fullProfileId && <FullProfileModal memberId={fullProfileId} close={() => setFullProfileId(null)}/>} 
   </div>;
 }

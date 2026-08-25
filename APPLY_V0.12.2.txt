@@ -1,0 +1,19 @@
+MOON v0.12.2 — INSTALL
+
+1) Extract moon-v0.12.2-fix.zip into the ROOT of your moon-web project and replace existing files.
+
+2) IMPORTANT: open Supabase -> SQL Editor, open:
+   supabase/MIGRATE_V0.12.2.sql
+   and run the ENTIRE file once.
+   This creates moderation_bans / moderation_notices and moon_admin_* RPCs,
+   then forces PostgREST schema reload.
+
+3) From the moon-web folder run:
+   git add -A
+   git commit -m "Moon v0.12.2 routing voice admin fix"
+   git push origin main
+
+4) Wait for GitHub Actions -> Deploy Moon to GitHub Pages to finish.
+
+For direct /im/... and /server/... URLs, scripts/postbuild-pages.mjs now creates a
+404 bridge. Do not replace the generated 404.html manually after the Pages build.

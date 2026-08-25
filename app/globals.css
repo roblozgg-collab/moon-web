@@ -205,3 +205,17 @@ button { border: 0; cursor: pointer; }
 .reduce-motion .dm-call-person.ringing-peer .call-avatar-shell::after{animation:none;opacity:.75}
 .plus-profile-controls .settings-toggle{margin:4px 0;padding:7px 0;border-bottom:1px solid color-mix(in srgb,var(--hover) 70%,transparent)}
 @media(max-width:760px){.user-panel,.persistent-voice-panel{width:min(312px,100vw)}}
+
+/* Moon v0.12.2 — stable SPA routes, full server voice stage, settings cleanup */
+.voice-room-v2,
+.voice-room-v2.joined{
+  flex:1 1 auto!important;
+  height:auto!important;
+  min-height:0!important;
+  max-height:none!important;
+  resize:none!important;
+  overflow:hidden!important;
+}
+.voice-room-v2 .server-voice-stage{min-height:0;overflow:auto;}
+.moon-app.settings-open .user-panel,
+.moon-app.settings-open .persistent-voice-panel{display:none!important;}
