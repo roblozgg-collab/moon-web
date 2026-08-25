@@ -27,6 +27,7 @@ function snapshot(updatedAt = Date.now()): LocalSharedState {
     friendLinks: state.friendLinks,
     calls: state.calls,
     invites: state.invites,
+    deletedMessageIds: state.deletedMessageIds,
     actorId: state.currentUser.id,
     updatedAt,
   };
@@ -59,12 +60,13 @@ function mergeShared(previous: LocalSharedState, incoming: LocalSharedState): Lo
     const actorLinks = (incoming.friendLinks ?? []).filter((link) => link.fromId === actorId || link.toId === actorId);
     friendLinks = mergeById(unrelated, actorLinks);
   } else friendLinks = mergeById(friendLinks, incoming.friendLinks ?? []);
+  const deletedMessageIds = Array.from(new Set([...(previous.deletedMessageIds ?? []), ...(incoming.deletedMessageIds ?? [])]));
   return {
     ...previous, ...incoming,
     servers: mergeById(previous.servers, incoming.servers), members: mergeById(previous.members, incoming.members),
-    messages: mergeById(previous.messages, incoming.messages), notices: mergeById(previous.notices, incoming.notices),
+    messages: mergeById(previous.messages, incoming.messages).filter((message) => !deletedMessageIds.includes(message.id ?? "")), notices: mergeById(previous.notices, incoming.notices),
     directMessages: mergeById(previous.directMessages, incoming.directMessages), friendLinks, calls: mergeCalls(previous.calls, incoming.calls),
-    invites: mergeById(previous.invites, incoming.invites), updatedAt: Math.max(previous.updatedAt ?? 0, incoming.updatedAt ?? 0),
+    invites: mergeById(previous.invites, incoming.invites), deletedMessageIds, updatedAt: Math.max(previous.updatedAt ?? 0, incoming.updatedAt ?? 0),
   };
 }
 
