@@ -14,7 +14,7 @@ type Lang = "ru" | "en";
 const AUTH_LANG_KEY = "moon:auth-language";
 const RECOVERY_PENDING_KEY = "moon:auth-recovery-pending";
 const RECOVERY_EMAIL_KEY = "moon:auth-recovery-email";
-const OTP_LENGTH = 6;
+const OTP_LENGTH = 8;
 
 export function AuthGate({ children }: { children: React.ReactNode }) {
   const [state, setState] = useState<GateState>("checking");
