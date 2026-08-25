@@ -51,6 +51,8 @@ export function VoiceSessionLayer() {
       setVoicePeers([]);
       return;
     }
+    const roomId = joinedVoiceId;
+    const currentUserId = currentUser.id;
     let disposed = false;
     setVoiceConnection("connecting");
     const peers = new Map<string, PeerBundle>();
@@ -58,12 +60,12 @@ export function VoiceSessionLayer() {
     let local!: MediaStream;
     let cameraStream: MediaStream | null = null;
     let screenStream: MediaStream | null = null;
-    const channel = supabase.channel(`moon-voice:${joinedVoiceId}`, { config: { presence: { key: currentUser.id }, broadcast: { self: false } } });
+    const channel = supabase.channel(`moon-voice:${roomId}`, { config: { presence: { key: currentUserId }, broadcast: { self: false } } });
 
-    const localPeer = (): VoicePeer => ({ id: currentUser.id!, name: currentUser.displayName, username: currentUser.username, avatar: currentUser.avatar, muted: useMoonStore.getState().muted, deafened: useMoonStore.getState().deafened, camera: useMoonStore.getState().cameraEnabled, screen: useMoonStore.getState().screenShareEnabled });
+    const localPeer = (): VoicePeer => ({ id: currentUserId, name: currentUser.displayName, username: currentUser.username, avatar: currentUser.avatar, muted: useMoonStore.getState().muted, deafened: useMoonStore.getState().deafened, camera: useMoonStore.getState().cameraEnabled, screen: useMoonStore.getState().screenShareEnabled });
     const currentVideoTrack = () => { const session = sessionRef.current; return session?.screenStream?.getVideoTracks()[0] ?? (useMoonStore.getState().cameraEnabled ? session?.cameraStream?.getVideoTracks()[0] ?? null : null); };
     const emit = (toId: string, payload: Omit<VoiceSignal, "id" | "roomId" | "fromId" | "toId">) => {
-      void channel.send({ type: "broadcast", event: "voice-signal", payload: { roomId: joinedVoiceId, id: `vs-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, fromId: currentUser.id, toId, ...payload } satisfies VoiceSignal });
+      void channel.send({ type: "broadcast", event: "voice-signal", payload: { roomId, id: `vs-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`, fromId: currentUserId, toId, ...payload } satisfies VoiceSignal });
     };
 
     const updatePeerSpeaking = (id: string, speaking: boolean) => {
@@ -88,7 +90,7 @@ export function VoiceSessionLayer() {
     const publishPresence = async () => {
       if (disposed) return;
       const state = useMoonStore.getState();
-      await channel.track({ userId: currentUser.id, name: state.currentUser.displayName, username: state.currentUser.username, avatar: state.currentUser.avatar, muted: state.muted, deafened: state.deafened, camera: state.cameraEnabled, screen: state.screenShareEnabled, joinedAt: Date.now() });
+      await channel.track({ userId: currentUserId, name: state.currentUser.displayName, username: state.currentUser.username, avatar: state.currentUser.avatar, muted: state.muted, deafened: state.deafened, camera: state.cameraEnabled, screen: state.screenShareEnabled, joinedAt: Date.now() });
     };
 
     const offer = async (peerId: string, bundle: PeerBundle) => {
@@ -136,22 +138,22 @@ export function VoiceSessionLayer() {
       const remotePeers: VoicePeer[] = [];
       for (const entries of Object.values(state)) for (const entry of entries ?? []) {
         const id = String(entry.userId ?? "");
-        if (!id || id === currentUser.id || seen.has(id)) continue;
+        if (!id || id === currentUserId || seen.has(id)) continue;
         seen.add(id);
         const old = useMoonStore.getState().voicePeers.find((peer) => peer.id === id);
         remotePeers.push({ id, name: String(entry.name ?? "User"), username: entry.username ? String(entry.username) : undefined, avatar: String(entry.avatar ?? "?"), muted: Boolean(entry.muted), deafened: Boolean(entry.deafened), camera: Boolean(entry.camera), screen: Boolean(entry.screen), speaking: old?.speaking });
         const bundle = ensurePeer(id);
-        if (currentUser.id! < id && bundle.pc.signalingState === "stable" && bundle.pc.connectionState !== "connected") window.setTimeout(() => void offer(id, bundle), 250);
+        if (currentUserId < id && bundle.pc.signalingState === "stable" && bundle.pc.connectionState !== "connected") window.setTimeout(() => void offer(id, bundle), 250);
       }
       for (const [id, bundle] of peers) if (!seen.has(id)) { bundle.pc.close(); bundle.audio.pause(); peers.delete(id); remoteStreams.delete(id); }
-      const me = useMoonStore.getState().voicePeers.find((peer) => peer.id === currentUser.id);
+      const me = useMoonStore.getState().voicePeers.find((peer) => peer.id === currentUserId);
       setVoicePeers([{ ...localPeer(), speaking: me?.speaking }, ...remotePeers]);
       mediaChanged();
     };
 
     const onSignal = async ({ payload }: any) => {
       const signal = payload as VoiceSignal;
-      if (!signal || signal.roomId !== joinedVoiceId || signal.toId !== currentUser.id || signal.fromId === currentUser.id) return;
+      if (!signal || signal.roomId !== roomId || signal.toId !== currentUserId || signal.fromId === currentUserId) return;
       const bundle = ensurePeer(signal.fromId);
       try {
         if (signal.type === "offer" && signal.sdp) {
@@ -190,7 +192,7 @@ export function VoiceSessionLayer() {
       local.getAudioTracks().forEach((track) => { track.enabled = !useMoonStore.getState().muted; });
       localPreviewStream = local; mediaChanged();
       sessionRef.current = { channel, local, cameraStream, screenStream, peers, stopped: false, speakingCleanup };
-      watchSpeaking(currentUser.id!, local);
+      watchSpeaking(currentUserId, local);
       channel.on("presence", { event: "sync" }, syncPresence).on("presence", { event: "join" }, syncPresence).on("presence", { event: "leave" }, syncPresence).on("broadcast", { event: "voice-signal" }, onSignal).subscribe(async (status: string) => {
         if (status === "SUBSCRIBED") { await publishPresence(); setVoiceConnection("connected"); syncPresence(); }
         if (status === "CHANNEL_ERROR" || status === "TIMED_OUT") setVoiceConnection("failed");
