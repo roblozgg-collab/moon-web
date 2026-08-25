@@ -14,7 +14,31 @@ type Lang = "ru" | "en";
 const AUTH_LANG_KEY = "moon:auth-language";
 const RECOVERY_PENDING_KEY = "moon:auth-recovery-pending";
 const RECOVERY_EMAIL_KEY = "moon:auth-recovery-email";
-const OTP_LENGTH = 8;
+const OTP_LENGTH = 6;
+
+async function enforceModerationAfterAuth() {
+  const supabase = getSupabaseBrowserClient();
+  if (!supabase) return;
+  const { data: authData } = await supabase.auth.getUser();
+  const user = authData.user;
+  if (!user) return;
+  const { data: bans } = await supabase.from("moderation_bans").select("id,reason,expires_at,revoked_at").eq("target_type", "user").eq("target_id", user.id).is("revoked_at", null).order("created_at", { ascending: false });
+  const activeBan = (bans ?? []).find((ban: any) => !ban.expires_at || new Date(ban.expires_at).getTime() > Date.now());
+  if (activeBan) {
+    await supabase.auth.signOut();
+    const until = activeBan.expires_at ? ` до ${new Date(activeBan.expires_at).toLocaleString()}` : " бессрочно";
+    throw new Error(`Аккаунт заблокирован${until}.${activeBan.reason ? ` Причина: ${activeBan.reason}` : ""}`);
+  }
+  const { data: notices } = await supabase.from("moderation_notices").select("id,kind,reason,created_at").eq("user_id", user.id).is("seen_at", null).order("created_at", { ascending: true });
+  if (notices?.length) {
+    const text = notices.map((item: any) => {
+      const what = item.kind === "avatar_removed" ? "Аватар был удалён администрацией." : item.kind === "banner_removed" ? "Баннер был удалён администрацией." : item.kind === "profile_media_removed" ? "Аватар и баннер были удалены администрацией." : "Сообщение администрации.";
+      return `${what}${item.reason ? `\nПричина: ${item.reason}` : ""}`;
+    }).join("\n\n");
+    window.setTimeout(() => window.alert(text), 120);
+    await supabase.from("moderation_notices").update({ seen_at: new Date().toISOString() }).in("id", notices.map((item: any) => item.id));
+  }
+}
 
 export function AuthGate({ children }: { children: React.ReactNode }) {
   const [state, setState] = useState<GateState>("checking");
@@ -37,6 +61,10 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
         if (sessionStorage.getItem(RECOVERY_PENDING_KEY) === "1") {
           setBackendMode("online");
           setState("guest");
+          return;
+        }
+        try { await enforceModerationAfterAuth(); } catch (error) {
+          if (!cancelled) { window.alert(error instanceof Error ? error.message : "Доступ к аккаунту ограничен."); setState("guest"); }
           return;
         }
         const profile = await getMyRemoteProfile();
@@ -64,13 +92,13 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
             return;
           }
           window.setTimeout(() => {
-            void getMyRemoteProfile().then((profile) => {
+            void enforceModerationAfterAuth().then(() => getMyRemoteProfile()).then((profile) => {
               if (!cancelled && profile) {
                 setCurrentUser(profileToCurrentUser(profile));
                 setBackendMode("online");
                 setState("authenticated");
               }
-            });
+            }).catch((error) => { if (!cancelled) { window.alert(error instanceof Error ? error.message : "Доступ к аккаунту ограничен."); setState("guest"); } });
           }, 0);
         }
       });
@@ -240,6 +268,7 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: (user: CurrentUser) 
     if (!/^\S+@\S+\.\S+$/.test(cleanEmail)) throw new Error(l("Для входа используй email.", "Use your email to log in."));
     const { error: authError } = await supabase.auth.signInWithPassword({ email: cleanEmail, password });
     if (authError) throw authError;
+    await enforceModerationAfterAuth();
     await finishRemoteAuth();
   };
 
@@ -249,6 +278,7 @@ function AuthScreen({ onAuthenticated }: { onAuthenticated: (user: CurrentUser) 
     if (otp.length !== OTP_LENGTH) throw new Error(l(`Введи ${OTP_LENGTH}-значный код.`, `Enter the ${OTP_LENGTH}-digit code.`));
     const { error: verifyError } = await supabase.auth.verifyOtp({ email: verificationEmail, token: otp, type: "email" });
     if (verifyError) throw verifyError;
+    await enforceModerationAfterAuth();
     await finishRemoteAuth();
   };
 

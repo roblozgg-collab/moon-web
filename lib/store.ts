@@ -25,6 +25,8 @@ import { isSupabaseConfigured } from "./supabase/client";
 import { findRemoteProfileByUsername, persistCurrentProfilePatch, profileToMember, validateRemoteUsername } from "./supabase/profile";
 
 export type HomeTab = "online" | "all" | "pending" | "blocked" | "add" | "plus";
+export type MoonTheme = "black" | "gray" | "light" | "plus";
+export type VoicePeer = { id: string; name: string; username?: string; avatar: string; muted: boolean; deafened: boolean; camera: boolean; screen: boolean; speaking?: boolean };
 export type BackendMode = "checking" | "online" | "offline" | "local";
 export type CurrentUser = {
   id?: string;
@@ -40,6 +42,7 @@ export type CurrentUser = {
   developer?: boolean;
   nicknameColor?: string;
   nicknameFont?: "default" | "serif" | "mono" | "rounded";
+  adminNameGradient?: { from: string; to: string } | null;
 };
 
 export type UserSettings = {
@@ -86,12 +89,15 @@ type MoonState = {
   activeDmId: string | null;
   memberListOpen: boolean;
   messages: Message[];
-  theme: "dark" | "light";
+  theme: MoonTheme;
   muted: boolean;
   deafened: boolean;
   cameraEnabled: boolean;
   screenShareEnabled: boolean;
   joinedVoiceId: string | null;
+  voicePeers: VoicePeer[];
+  voiceConnection: "disconnected" | "connecting" | "connected" | "failed";
+  bannedServerIds: string[];
   replyingToId: string | null;
   backendMode: BackendMode;
   currentUser: CurrentUser;
@@ -116,7 +122,7 @@ type MoonState = {
   setReplyingTo: (messageId: string | null) => void;
   createServer: (name: string) => void;
   createChannel: (name: string, type: "text" | "voice") => void;
-  updateServer: (serverId: string, patch: Partial<Pick<Server, "name" | "accent" | "icon">>) => void;
+  updateServer: (serverId: string, patch: Partial<Pick<Server, "name" | "accent" | "icon" | "banner">>) => void;
   deleteServer: (serverId: string) => void;
   leaveServer: (serverId: string) => void;
   inviteUserToServer: (serverId: string, userId: string) => void;
@@ -124,12 +130,19 @@ type MoonState = {
   sendServerInvite: (serverId: string, userId: string, customCode?: string) => Promise<{ ok: boolean; message: string; code?: string }>;
   acceptServerInvite: (code: string) => { ok: boolean; message: string; serverId?: string };
   createRole: (serverId: string, role: { name: string; color: string; permissions: string[] }) => void;
-  setTheme: (theme: "dark" | "light") => void;
+  updateRole: (serverId: string, roleId: string, patch: Partial<{ name: string; color: string; permissions: string[]; displaySeparately: boolean; mentionable: boolean }>) => void;
+  deleteRole: (serverId: string, roleId: string) => void;
+  moveRole: (serverId: string, roleId: string, direction: "up" | "down") => void;
+  assignRole: (serverId: string, memberId: string, roleId: string, assigned: boolean) => void;
+  setTheme: (theme: MoonTheme) => void;
   toggleMute: () => void;
   toggleDeafen: () => void;
   setCameraEnabled: (enabled: boolean) => void;
   setScreenShareEnabled: (enabled: boolean) => void;
   toggleVoice: (channelId: string) => void;
+  setVoicePeers: (peers: VoicePeer[]) => void;
+  setVoiceConnection: (state: MoonState["voiceConnection"]) => void;
+  setBannedServerIds: (ids: string[]) => void;
   setBackendMode: (mode: BackendMode) => void;
   setCurrentUser: (user: CurrentUser) => void;
   updateProfile: (patch: Partial<Pick<CurrentUser, "displayName" | "username" | "avatar" | "banner" | "bio" | "profileGradient">>) => { ok: boolean; message?: string };
@@ -187,6 +200,7 @@ function makeInitialMember(user: CurrentUser): Member | null {
     developer: user.developer,
     nicknameColor: user.nicknameColor,
     nicknameFont: user.nicknameFont,
+    adminNameGradient: user.adminNameGradient ?? null,
   };
 }
 
@@ -247,12 +261,15 @@ export const useMoonStore = create<MoonState>((set, get) => ({
   activeDmId: null,
   memberListOpen: true,
   messages: initialMessages,
-  theme: "dark",
+  theme: "gray",
   muted: false,
   deafened: false,
   cameraEnabled: false,
   screenShareEnabled: false,
   joinedVoiceId: null,
+  voicePeers: [],
+  voiceConnection: "disconnected",
+  bannedServerIds: [],
   replyingToId: null,
   backendMode: "checking",
   typing: {},
@@ -260,6 +277,7 @@ export const useMoonStore = create<MoonState>((set, get) => ({
   userSettings: DEFAULT_SETTINGS,
 
   setActiveServer: (serverId) => {
+    if (get().bannedServerIds.includes(serverId)) return;
     const server = get().servers.find((item) => item.id === serverId);
     if (!server) return;
     const first = server.channels.find((channel) => channel.type === "text") ?? server.channels[0];
@@ -472,13 +490,45 @@ export const useMoonStore = create<MoonState>((set, get) => ({
     const nextRole = { id: `role-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, name: role.name.trim() || "New Role", color: role.color, position: (server.roles?.length ?? 0) + 1, displaySeparately: true, mentionable: true, permissions: role.permissions };
     return { ...server, roles: [...(server.roles ?? []), nextRole] };
   }) })),
+  updateRole: (serverId, roleId, patch) => set((state) => ({ servers: state.servers.map((server) => {
+    if (server.id !== serverId || server.ownerId !== state.currentUser.id) return server;
+    return { ...server, roles: (server.roles ?? []).map((role) => role.id === roleId ? { ...role, ...patch, name: patch.name?.trim() || role.name } : role) };
+  }) })),
+  deleteRole: (serverId, roleId) => set((state) => ({ servers: state.servers.map((server) => {
+    if (server.id !== serverId || server.ownerId !== state.currentUser.id) return server;
+    const assignments = Object.fromEntries(Object.entries(server.roleAssignments ?? {}).map(([memberId, ids]) => [memberId, (ids as string[]).filter((id) => id !== roleId)]));
+    return { ...server, roles: (server.roles ?? []).filter((role) => role.id !== roleId), roleAssignments: assignments };
+  }) })),
+  moveRole: (serverId, roleId, direction) => set((state) => ({ servers: state.servers.map((server) => {
+    if (server.id !== serverId || server.ownerId !== state.currentUser.id) return server;
+    const roles = [...(server.roles ?? [])].sort((a, b) => b.position - a.position);
+    const index = roles.findIndex((role) => role.id === roleId);
+    const swap = direction === "up" ? index - 1 : index + 1;
+    if (index < 0 || swap < 0 || swap >= roles.length) return server;
+    [roles[index], roles[swap]] = [roles[swap], roles[index]];
+    const normalized = roles.map((role, i) => ({ ...role, position: roles.length - i }));
+    return { ...server, roles: normalized };
+  }) })),
+  assignRole: (serverId, memberId, roleId, assigned) => set((state) => ({ servers: state.servers.map((server) => {
+    if (server.id !== serverId || server.ownerId !== state.currentUser.id) return server;
+    const current = server.roleAssignments?.[memberId] ?? [];
+    const next = assigned ? Array.from(new Set([...current, roleId])) : current.filter((id) => id !== roleId);
+    return { ...server, roleAssignments: { ...(server.roleAssignments ?? {}), [memberId]: next } };
+  }) })),
 
-  setTheme: (theme) => set({ theme }),
+  setTheme: (theme) => {
+    if (theme === "plus" && !get().currentUser.plus) return;
+    if (typeof window !== "undefined") localStorage.setItem("moon:theme", theme);
+    set({ theme });
+  },
   toggleMute: () => set((state) => state.muted ? { muted: false, deafened: false } : { muted: true }),
   toggleDeafen: () => set((state) => state.deafened ? { deafened: false } : { deafened: true, muted: true }),
   setCameraEnabled: (cameraEnabled) => set({ cameraEnabled }),
   setScreenShareEnabled: (screenShareEnabled) => set({ screenShareEnabled }),
-  toggleVoice: (channelId) => set((state) => ({ joinedVoiceId: state.joinedVoiceId === channelId ? null : channelId })),
+  toggleVoice: (channelId) => set((state) => state.joinedVoiceId === channelId ? { joinedVoiceId: null, voicePeers: [], voiceConnection: "disconnected", cameraEnabled: false, screenShareEnabled: false } : { joinedVoiceId: channelId, voiceConnection: "connecting" }),
+  setVoicePeers: (voicePeers) => set({ voicePeers }),
+  setVoiceConnection: (voiceConnection) => set({ voiceConnection }),
+  setBannedServerIds: (bannedServerIds) => set({ bannedServerIds }),
   setBackendMode: (backendMode) => set({ backendMode }),
   setCurrentUser: (currentUser) => set((state) => {
     const member = makeInitialMember(currentUser);
@@ -487,6 +537,7 @@ export const useMoonStore = create<MoonState>((set, get) => ({
     return {
       currentUser,
       members,
+      theme: (typeof window !== "undefined" ? (localStorage.getItem("moon:theme") as MoonTheme | null) : null) ?? state.theme,
       friends: buildFriends(state.friendLinks, members, currentUser.id),
       messages: normalizeOwnership(state.messages, currentUser.id),
       backendMode: isSupabaseConfigured() ? "online" : "local",
@@ -508,10 +559,10 @@ export const useMoonStore = create<MoonState>((set, get) => ({
         persistCurrentProfilePatch(patch);
       } else {
         const account = updateLocalAccount(state.currentUser.id, patch as any);
-        nextUser = { ...state.currentUser, displayName: account.displayName, username: account.username, avatar: account.avatar, banner: account.banner, bio: account.bio, profileGradient: account.profileGradient, plus: account.plus, plusBadgeVisible: account.plusBadgeVisible, developer: account.developer, nicknameColor: account.nicknameColor, nicknameFont: account.nicknameFont };
+        nextUser = { ...state.currentUser, displayName: account.displayName, username: account.username, avatar: account.avatar, banner: account.banner, bio: account.bio, profileGradient: account.profileGradient, plus: account.plus, plusBadgeVisible: account.plusBadgeVisible, developer: account.developer, nicknameColor: account.nicknameColor, nicknameFont: account.nicknameFont, adminNameGradient: nextUser.adminNameGradient };
       }
       set((current) => {
-        const members = current.members.map((member) => member.id === nextUser.id ? { ...member, name: nextUser.displayName, username: nextUser.username, avatar: nextUser.avatar, banner: nextUser.banner, bio: nextUser.bio, profileGradient: nextUser.profileGradient, plus: nextUser.plus, plusBadgeVisible: nextUser.plusBadgeVisible, developer: nextUser.developer, nicknameColor: nextUser.nicknameColor, nicknameFont: nextUser.nicknameFont } : member);
+        const members = current.members.map((member) => member.id === nextUser.id ? { ...member, name: nextUser.displayName, username: nextUser.username, avatar: nextUser.avatar, banner: nextUser.banner, bio: nextUser.bio, profileGradient: nextUser.profileGradient, plus: nextUser.plus, plusBadgeVisible: nextUser.plusBadgeVisible, developer: nextUser.developer, nicknameColor: nextUser.nicknameColor, nicknameFont: nextUser.nicknameFont, adminNameGradient: nextUser.adminNameGradient } : member);
         return { currentUser: nextUser, members, friends: buildFriends(current.friendLinks, members, nextUser.id), messages: current.messages.map((message) => message.authorId === nextUser.id ? { ...message, author: nextUser.displayName, avatar: nextUser.avatar, own: true } : message) };
       });
       return { ok: true };
@@ -634,24 +685,18 @@ export const useMoonStore = create<MoonState>((set, get) => ({
   },
   setLocalPlusPreview: (enabled) => {
     const state = get();
-    if (!state.currentUser.id) return;
-    if (isSupabaseConfigured()) persistCurrentProfilePatch({ plus: enabled });
-    else { try { updateLocalAccount(state.currentUser.id, { plus: enabled }); } catch { /* ignore */ } }
-    set((current) => ({
-      currentUser: { ...current.currentUser, plus: enabled },
-      members: current.members.map((member) => member.id === current.currentUser.id ? { ...member, plus: enabled } : member),
-    }));
+    if (!state.currentUser.id || isSupabaseConfigured()) return;
+    try { updateLocalAccount(state.currentUser.id, { plus: enabled }); } catch { return; }
+    set((current) => ({ currentUser: { ...current.currentUser, plus: enabled }, members: current.members.map((member) => member.id === current.currentUser.id ? { ...member, plus: enabled } : member) }));
   },
   purchasePlus: () => {
+    // Cloud MoonLobby never lets a browser grant itself PLUS. Admin/payment backends use protected RPCs.
+    if (isSupabaseConfigured()) return;
     const state = get();
     if (!state.currentUser.id) return;
     const patch = { plus: true, plusBadgeVisible: true };
-    if (isSupabaseConfigured()) persistCurrentProfilePatch(patch);
-    else { try { updateLocalAccount(state.currentUser.id, patch); } catch { /* ignore */ } }
-    set((current) => ({
-      currentUser: { ...current.currentUser, ...patch },
-      members: current.members.map((member) => member.id === current.currentUser.id ? { ...member, ...patch } : member),
-    }));
+    try { updateLocalAccount(state.currentUser.id, patch); } catch { return; }
+    set((current) => ({ currentUser: { ...current.currentUser, ...patch }, members: current.members.map((member) => member.id === current.currentUser.id ? { ...member, ...patch } : member) }));
   },
   setPlusStyle: (patch) => {
     const state = get();

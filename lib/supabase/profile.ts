@@ -18,6 +18,7 @@ export type MoonProfileRow = {
   developer: boolean | null;
   nickname_color: string | null;
   nickname_font: "default" | "serif" | "mono" | "rounded" | null;
+  admin_name_gradient: { from: string; to: string } | null;
   created_at?: string;
   updated_at?: string;
 };
@@ -49,6 +50,7 @@ export function profileToCurrentUser(profile: MoonProfileRow): CurrentUser {
     developer: Boolean(profile.developer),
     nicknameColor: profile.nickname_color ?? "#f2f3f5",
     nicknameFont: profile.nickname_font ?? "default",
+    adminNameGradient: profile.admin_name_gradient ?? null,
   };
 }
 
@@ -70,6 +72,7 @@ export function profileToMember(profile: MoonProfileRow): Member {
     developer: current.developer,
     nicknameColor: current.nicknameColor,
     nicknameFont: current.nicknameFont,
+    adminNameGradient: current.adminNameGradient ?? null,
   };
 }
 

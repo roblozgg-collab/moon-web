@@ -1,4 +1,4 @@
--- Moon Web v0.11.0 — Supabase bootstrap
+-- MoonLobby v0.12.0 — Supabase bootstrap
 -- Run this whole file once in Supabase Dashboard -> SQL Editor.
 -- Safe to re-run: objects are created/updated idempotently where possible.
 
@@ -24,6 +24,7 @@ create table if not exists public.profiles (
   developer boolean not null default false,
   nickname_color text not null default '#f2f3f5',
   nickname_font text not null default 'default' check (nickname_font in ('default','serif','mono','rounded')),
+  admin_name_gradient jsonb,
   created_at timestamptz not null default now(),
   updated_at timestamptz not null default now(),
   constraint profiles_username_format check (
@@ -31,6 +32,8 @@ create table if not exists public.profiles (
     and username ~ '^[a-z0-9_.]{2,32}$'
   )
 );
+
+alter table public.profiles add column if not exists admin_name_gradient jsonb;
 
 create table if not exists public.moon_shared_state (
   id text primary key,
@@ -48,8 +51,7 @@ values ('global')
 on conflict (id) do nothing;
 
 -- Keep updated_at automatic and prevent browser clients from granting themselves
--- the developer badge. Plus remains intentionally user-controlled for the current
--- fake-purchase beta.
+-- developer badge, Plus entitlement, or admin-only nickname gradient.
 create or replace function public.moon_profile_before_update()
 returns trigger
 language plpgsql
@@ -58,7 +60,13 @@ set search_path = public
 as $$
 begin
   new.id := old.id;
-  new.developer := old.developer;
+  -- Browser clients may not grant themselves developer/Plus/admin-only styling.
+  -- Security-definer admin RPCs set a transaction-local override flag.
+  if auth.uid() is not null and coalesce(current_setting('moon.admin_override', true), '0') <> '1' then
+    new.developer := old.developer;
+    new.plus := old.plus;
+    new.admin_name_gradient := old.admin_name_gradient;
+  end if;
   new.created_at := old.created_at;
   new.username := lower(trim(new.username));
   new.updated_at := now();
@@ -254,3 +262,161 @@ using (
   bucket_id = 'moon-media'
   and (storage.foldername(name))[1] = auth.uid()::text
 );
+
+
+-- Moon v0.12 moderation/admin --------------------------------------------------
+create table if not exists public.moderation_bans (
+  id uuid primary key default gen_random_uuid(),
+  target_type text not null check (target_type in ('user','server')),
+  target_id text not null,
+  reason text not null default '',
+  created_by uuid references auth.users(id) on delete set null,
+  created_at timestamptz not null default now(),
+  expires_at timestamptz,
+  revoked_at timestamptz
+);
+create index if not exists moderation_bans_target_idx on public.moderation_bans(target_type, target_id, created_at desc);
+
+create table if not exists public.moderation_notices (
+  id uuid primary key default gen_random_uuid(),
+  user_id uuid not null references auth.users(id) on delete cascade,
+  kind text not null check (kind in ('avatar_removed','banner_removed','profile_media_removed','admin_message')),
+  reason text not null default '',
+  created_by uuid references auth.users(id) on delete set null,
+  created_at timestamptz not null default now(),
+  seen_at timestamptz
+);
+create index if not exists moderation_notices_user_idx on public.moderation_notices(user_id, created_at desc);
+
+create or replace function public.moon_is_developer(candidate uuid default auth.uid())
+returns boolean
+language sql
+stable
+security definer
+set search_path = public
+as $$
+  select exists(select 1 from public.profiles where id = candidate and developer = true);
+$$;
+
+grant execute on function public.moon_is_developer(uuid) to authenticated;
+
+create or replace function public.moon_admin_ban(target_kind text, target text, reason_text text default '', duration_hours integer default null)
+returns uuid
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare
+  ban_id uuid;
+begin
+  if not public.moon_is_developer(auth.uid()) then raise exception 'Developer access required'; end if;
+  if target_kind not in ('user','server') then raise exception 'Invalid target type'; end if;
+  if coalesce(trim(target),'') = '' then raise exception 'Target ID is required'; end if;
+  insert into public.moderation_bans(target_type,target_id,reason,created_by,expires_at)
+  values(target_kind, trim(target), coalesce(reason_text,''), auth.uid(),
+    case when duration_hours is null or duration_hours <= 0 then null else now() + make_interval(hours => duration_hours) end)
+  returning id into ban_id;
+  return ban_id;
+end;
+$$;
+
+grant execute on function public.moon_admin_ban(text,text,text,integer) to authenticated;
+
+create or replace function public.moon_admin_unban(ban_id uuid)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if not public.moon_is_developer(auth.uid()) then raise exception 'Developer access required'; end if;
+  update public.moderation_bans set revoked_at = now() where id = ban_id and revoked_at is null;
+end;
+$$;
+
+grant execute on function public.moon_admin_unban(uuid) to authenticated;
+
+create or replace function public.moon_admin_set_plus(target_user_id uuid, enabled boolean)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if not public.moon_is_developer(auth.uid()) then raise exception 'Developer access required'; end if;
+  perform set_config('moon.admin_override','1',true);
+  update public.profiles set plus = enabled, plus_badge_visible = case when enabled then true else plus_badge_visible end where id = target_user_id;
+end;
+$$;
+
+grant execute on function public.moon_admin_set_plus(uuid,boolean) to authenticated;
+
+create or replace function public.moon_admin_moderate_profile(target_user_id uuid, remove_avatar boolean, remove_banner boolean, reason_text text default '')
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+declare notice_kind text;
+begin
+  if not public.moon_is_developer(auth.uid()) then raise exception 'Developer access required'; end if;
+  if not remove_avatar and not remove_banner then raise exception 'Select avatar and/or banner'; end if;
+  perform set_config('moon.admin_override','1',true);
+  update public.profiles
+  set avatar_url = case when remove_avatar then null else avatar_url end,
+      banner_url = case when remove_banner then null else banner_url end
+  where id = target_user_id;
+  notice_kind := case when remove_avatar and remove_banner then 'profile_media_removed' when remove_avatar then 'avatar_removed' else 'banner_removed' end;
+  insert into public.moderation_notices(user_id,kind,reason,created_by)
+  values(target_user_id, notice_kind, coalesce(reason_text,''), auth.uid());
+end;
+$$;
+
+grant execute on function public.moon_admin_moderate_profile(uuid,boolean,boolean,text) to authenticated;
+
+create or replace function public.moon_admin_set_name_gradient(color_from text, color_to text)
+returns void
+language plpgsql
+security definer
+set search_path = public
+as $$
+begin
+  if not public.moon_is_developer(auth.uid()) then raise exception 'Developer access required'; end if;
+  if color_from !~ '^#[0-9A-Fa-f]{6}$' or color_to !~ '^#[0-9A-Fa-f]{6}$' then raise exception 'Invalid colors'; end if;
+  perform set_config('moon.admin_override','1',true);
+  update public.profiles set admin_name_gradient = jsonb_build_object('from',color_from,'to',color_to) where id = auth.uid();
+end;
+$$;
+
+grant execute on function public.moon_admin_set_name_gradient(text,text) to authenticated;
+
+alter table public.moderation_bans enable row level security;
+alter table public.moderation_notices enable row level security;
+grant select on public.moderation_bans to authenticated;
+grant select, update on public.moderation_notices to authenticated;
+
+drop policy if exists "moderation_bans_read" on public.moderation_bans;
+create policy "moderation_bans_read" on public.moderation_bans for select to authenticated
+using (
+  public.moon_is_developer(auth.uid())
+  or target_type = 'server'
+  or (target_type = 'user' and target_id = auth.uid()::text)
+);
+
+drop policy if exists "moderation_notices_read" on public.moderation_notices;
+create policy "moderation_notices_read" on public.moderation_notices for select to authenticated
+using (user_id = auth.uid() or public.moon_is_developer(auth.uid()));
+
+drop policy if exists "moderation_notices_mark_seen" on public.moderation_notices;
+create policy "moderation_notices_mark_seen" on public.moderation_notices for update to authenticated
+using (user_id = auth.uid()) with check (user_id = auth.uid());
+
+do $$
+begin
+  if not exists (select 1 from pg_publication_tables where pubname='supabase_realtime' and schemaname='public' and tablename='moderation_bans') then
+    alter publication supabase_realtime add table public.moderation_bans;
+  end if;
+  if not exists (select 1 from pg_publication_tables where pubname='supabase_realtime' and schemaname='public' and tablename='moderation_notices') then
+    alter publication supabase_realtime add table public.moderation_notices;
+  end if;
+end $$;
