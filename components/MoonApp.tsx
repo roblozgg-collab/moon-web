@@ -65,15 +65,35 @@ import { createPortal } from "react-dom";
 import { APP_NAME, BASE_PATH, withBasePath } from "@/lib/config";
 import { type Attachment, type CallSession, type DirectMessage, type Friend, type Member, type Message, type ServerInvite, type Role } from "@/lib/data";
 import { startSupabaseRealtimeSync } from "@/lib/supabase/sync";
-import { getMyRemoteProfile, profileToCurrentUser } from "@/lib/supabase/profile";
+import { getMyRemoteProfile, profileToCurrentUser, profileToMember } from "@/lib/supabase/profile";
 import { getSupabaseBrowserClient } from "@/lib/supabase/client";
 import { uploadLocalImage } from "@/lib/media";
-import { type HomeTab, type MoonTheme, useMoonStore } from "@/lib/store";
+import { hasServerPermission, type HomeTab, type MoonTheme, useMoonStore } from "@/lib/store";
 import { VoiceSessionLayer, getVoiceLocalStream, getVoiceRemoteStream } from "@/components/VoiceSessionLayer";
+import { navigateMoon, parseMoonRoute, SETTINGS_PAGES, SETTINGS_SLUGS } from "@/lib/routes";
 
 type Modal = null | "server" | "channel" | "settings" | "invite" | "serverSettings" | "editServer";
 type SidePanel = null | "pins" | "inbox" | "search";
 const EMPTY_TYPING: string[] = [];
+
+function formatAccountDate(value?: string) {
+  if (!value) return "—";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "—";
+  return new Intl.DateTimeFormat("en-GB", { day: "numeric", month: "long", year: "numeric" }).format(date);
+}
+
+function readableError(error: unknown) {
+  if (error instanceof Error) return error.message;
+  if (typeof error === "string") return error;
+  if (error && typeof error === "object") {
+    const item = error as Record<string, unknown>;
+    const parts = [item.message, item.details, item.hint, item.code].filter((value): value is string => typeof value === "string" && Boolean(value.trim()));
+    if (parts.length) return parts.join(" · ");
+    try { return JSON.stringify(error); } catch { /* noop */ }
+  }
+  return "Unknown error";
+}
 
 function dmPeerId(dm: DirectMessage, currentUserId?: string) {
   return dm.participantIds?.find((id) => id !== currentUserId) ?? dm.memberId;
@@ -104,11 +124,15 @@ function UserBadges({ user }: { user: Pick<Member, "plus" | "plusBadgeVisible" |
   </span>;
 }
 
-function NameStyle({ user, children }: { user?: Pick<Member, "nicknameColor" | "nicknameFont" | "plus" | "developer" | "adminNameGradient"> | { nicknameColor?: string; nicknameFont?: string; plus?: boolean; developer?: boolean; adminNameGradient?: { from: string; to: string } | null }; children: ReactNode }) {
-  const font = user?.plus ? user.nicknameFont : "default";
+function NameStyle({ user, children }: { user?: Pick<Member, "nicknameColor" | "nicknameColorEnabled" | "nicknameFont" | "nicknameFontEnabled" | "plus" | "developer" | "adminNameGradient"> | { nicknameColor?: string; nicknameColorEnabled?: boolean; nicknameFont?: string; nicknameFontEnabled?: boolean; plus?: boolean; developer?: boolean; adminNameGradient?: { from: string; to: string } | null }; children: ReactNode }) {
+  const font = user?.plus && user.nicknameFontEnabled !== false ? user.nicknameFont : "default";
   const adminGradient = user?.developer ? user.adminNameGradient : null;
   const className = `nickname-style nickname-${font ?? "default"} ${adminGradient ? "admin-gradient-name" : ""}`;
-  const style = adminGradient ? { backgroundImage: `linear-gradient(90deg, ${adminGradient.from}, ${adminGradient.to}, ${adminGradient.from})` } : user?.plus && user.nicknameColor ? { color: user.nicknameColor } : undefined;
+  const style = adminGradient
+    ? { backgroundImage: `linear-gradient(90deg, ${adminGradient.from}, ${adminGradient.to}, ${adminGradient.from})` }
+    : user?.plus && user.nicknameColorEnabled !== false && user.nicknameColor
+      ? { color: user.nicknameColor }
+      : undefined;
   return <span className={className} style={style}>{children}</span>;
 }
 
@@ -118,15 +142,22 @@ function isImageSource(label?: string) {
 }
 
 function Avatar({ label, status, large = false, memberId }: { label: string; status?: "online" | "idle" | "dnd" | "offline"; large?: boolean; memberId?: string }) {
-  return <span className={`avatar ${large ? "large" : ""} ${memberId ? "avatar-clickable" : ""}`} onClick={memberId ? (event) => { event.stopPropagation(); window.dispatchEvent(new CustomEvent("moon:open-profile", { detail: { memberId } })); } : undefined}>{isImageSource(label) ? <img src={label} alt="" draggable={false}/> : label}{status && <i className={`status ${status}`} />}</span>;
+  const [broken, setBroken] = useState(false);
+  useEffect(() => setBroken(false), [label]);
+  const fallback = label && !isImageSource(label) ? label : (label?.slice(0, 1).toUpperCase() || "?");
+  return <span className={`avatar ${large ? "large" : ""} ${memberId ? "avatar-clickable" : ""}`} onClick={memberId ? (event) => { event.stopPropagation(); window.dispatchEvent(new CustomEvent("moon:open-profile", { detail: { memberId } })); } : undefined}>{isImageSource(label) && !broken ? <img src={label} alt="" draggable={false} onError={() => setBroken(true)}/> : fallback}{status && <i className={`status ${status}`} />}</span>;
 }
 
 function CallAvatar({ label, name }: { label: string; name: string }) {
-  return <div className="call-avatar-shell">{isImageSource(label) ? <img src={label} alt={name} draggable={false}/> : <span className="call-avatar-initial">{label || name.slice(0, 1).toUpperCase()}</span>}</div>;
+  const [broken, setBroken] = useState(false);
+  useEffect(() => setBroken(false), [label]);
+  return <div className="call-avatar-shell">{isImageSource(label) && !broken ? <img src={label} alt={name} draggable={false} onError={() => setBroken(true)}/> : <span className="call-avatar-initial">{isImageSource(label) ? name.slice(0, 1).toUpperCase() : (label || name.slice(0, 1).toUpperCase())}</span>}</div>;
 }
 
 function BannerMedia({ className, src }: { className: string; src?: string }) {
-  return <div className={`${className} banner-media`}>{src ? <img className="banner-media-image" src={src} alt="" draggable={false}/> : null}</div>;
+  const [broken, setBroken] = useState(false);
+  useEffect(() => setBroken(false), [src]);
+  return <div className={`${className} banner-media`}>{src && !broken ? <img className="banner-media-image" src={src} alt="" draggable={false} onError={() => setBroken(true)}/> : null}</div>;
 }
 
 function IconButton({ label, onClick, active, danger, children }: { label: string; onClick?: () => void; active?: boolean; danger?: boolean; children: ReactNode }) {
@@ -153,13 +184,14 @@ function ServerRail({ openServerModal, openInviteModal, openEditServer, openServ
   const activeServerId = useMoonStore((s) => s.activeServerId);
   const currentUser = useMoonStore((s) => s.currentUser);
   const bannedServerIds = useMoonStore((s) => s.bannedServerIds);
+  const developerMode = useMoonStore((s) => s.userSettings.developerMode);
   const setActiveServer = useMoonStore((s) => s.setActiveServer);
   const openHome = useMoonStore((s) => s.openHome);
   const deleteServer = useMoonStore((s) => s.deleteServer);
   const leaveServer = useMoonStore((s) => s.leaveServer);
   const l = useL();
   const [context, setContext] = useState<{ serverId: string; x: number; y: number } | null>(null);
-  const visibleServers = servers.filter((server) => !bannedServerIds.includes(server.id) && (server.ownerId === currentUser.id || server.memberIds?.includes(currentUser.id ?? "")));
+  const visibleServers = servers.filter((server) => !bannedServerIds.includes(server.id) && !server.bannedMemberIds?.includes(currentUser.id ?? "") && (server.ownerId === currentUser.id || server.memberIds?.includes(currentUser.id ?? "")));
   const contextServer = context ? servers.find((server) => server.id === context.serverId) : undefined;
   const isOwner = Boolean(contextServer && contextServer.ownerId === currentUser.id);
 
@@ -184,6 +216,7 @@ function ServerRail({ openServerModal, openInviteModal, openEditServer, openServ
       <button onClick={() => activate(contextServer.id, () => openInviteModal(contextServer.id))}><UserPlus size={16}/> {l("Пригласить людей", "Invite People")}</button>
       {isOwner && <button onClick={() => activate(contextServer.id, () => openEditServer(contextServer.id))}><Pencil size={16}/> {l("Редактировать сервер", "Edit Server")}</button>}
       {isOwner && <button onClick={() => activate(contextServer.id, () => openServerSettings(contextServer.id))}><Settings size={16}/> {l("Настройки сервера", "Server Settings")}</button>}
+      {developerMode && <button onClick={() => { void navigator.clipboard?.writeText(contextServer.id); setContext(null); }}><Copy size={16}/> {l("Копировать ID сервера", "Copy Server ID")}</button>}
       <div className="context-separator"/>
       {isOwner ? <button className="danger" onClick={() => { if (window.confirm(`Delete ${contextServer.name}?`)) deleteServer(contextServer.id); setContext(null); }}><Trash2 size={16}/> {l("Удалить сервер", "Delete Server")}</button> : <button className="danger" onClick={() => { if (window.confirm(`Leave ${contextServer.name}?`)) leaveServer(contextServer.id); setContext(null); }}><LogOut size={16}/> {l("Покинуть сервер", "Leave Server")}</button>}
     </div>}
@@ -227,13 +260,13 @@ function VoiceConnectionPanel() {
   const setActiveServer = useMoonStore((s) => s.setActiveServer);
   const setActiveChannel = useMoonStore((s) => s.setActiveChannel);
   const l = useL();
-  if (!joinedVoiceId) return null;
+  if (!joinedVoiceId || connection !== "connected") return null;
   const server = servers.find((item) => item.channels.some((channel) => channel.id === joinedVoiceId));
   const channel = server?.channels.find((item) => item.id === joinedVoiceId);
   if (!server || !channel) return null;
   const openVoice = () => { setActiveServer(server.id); setActiveChannel(channel.id); };
   return <div className="persistent-voice-panel">
-    <button className="voice-status-main" onClick={openVoice}><span className={`voice-status-icon ${connection}`}><Wifi size={16}/></span><span><strong>{connection === "connected" ? l("Voice Connected", "Voice Connected") : connection === "failed" ? l("Ошибка подключения", "Connection failed") : l("Подключение…", "Connecting…")}</strong><small>{channel.name} / {server.name}</small></span>{screen && <MonitorUp className="voice-screen-live" size={17}/>}</button>
+    <button className="voice-status-main" onClick={openVoice}><span className={`voice-status-icon ${connection}`}><Wifi size={16}/></span><span><strong>{l("Voice Connected", "Voice Connected")}</strong><small>{channel.name} / {server.name}</small></span>{screen && <MonitorUp className="voice-screen-live" size={17}/>}</button>
     <button className="voice-disconnect-mini" title={l("Отключиться", "Disconnect")} onClick={() => toggleVoice(joinedVoiceId)}><PhoneOff size={16}/></button>
   </div>;
 }
@@ -344,6 +377,7 @@ function HomeSidebar({ openSettings }: { openSettings: (page?: string) => void }
   const openDm = useMoonStore((s) => s.openDm);
   const closeDm = useMoonStore((s) => s.closeDm);
   const setHomeTab = useMoonStore((s) => s.setHomeTab);
+  const homeTab = useMoonStore((s) => s.homeTab);
   const dms = useMoonStore((s) => s.directMessages);
   const memberList = useMoonStore((s) => s.members);
   const friendList = useMoonStore((s) => s.friends);
@@ -369,7 +403,7 @@ function HomeSidebar({ openSettings }: { openSettings: (page?: string) => void }
 
   return <aside className="channel-sidebar dm-sidebar">
     <div className="dm-search"><input value={query} onChange={(e) => setQuery(e.target.value)} placeholder={l("Найти или начать беседу", "Find or start a conversation")}/></div>
-    <div className="dm-nav"><button className={!activeDmId ? "active" : ""} onClick={() => setHomeTab("online")}><Users size={20}/> {l("Друзья", "Friends")}</button><button onClick={() => setHomeTab("plus")}><Gift size={20}/> Moon Plus</button></div>
+    <div className="dm-nav"><button className={!activeDmId && homeTab !== "plus" ? "active" : ""} onClick={() => setHomeTab("online")}><Users size={20}/> {l("Друзья", "Friends")}</button><button className={!activeDmId && homeTab === "plus" ? "active" : ""} onClick={() => setHomeTab("plus")}><Gift size={20}/> Moon Plus</button></div>
     <div className="dm-heading"><span>{l("ЛИЧНЫЕ СООБЩЕНИЯ", "DIRECT MESSAGES")}</span><button title={l("Новое личное сообщение", "New DM")} onClick={() => setHomeTab("all")}><Plus size={15}/></button></div>
     <div className="dm-list">{shown.map((dm) => { const peerId = dmPeerId(dm, currentUser.id); const member = memberList.find((m) => m.id === peerId) ?? friendList.find((m) => m.id === peerId); if (!member) return null; const pinned = dm.pinnedFor?.includes(currentUser.id ?? ""); return <div key={dm.id} className={`dm-item-wrap ${activeDmId === dm.id ? "active" : ""}`} onContextMenu={(e) => { e.preventDefault(); setContext({ dmId: dm.id, x: e.clientX, y: e.clientY }); }}><button onClick={() => openDm(dm.id)} className={`dm-item ${activeDmId === dm.id ? "active" : ""}`}><Avatar label={member.avatar} status={member.status} memberId={member.id}/><span><strong><NameStyle user={member}>{member.name}</NameStyle><UserBadges user={member}/></strong><small>{member.activity ?? member.status}</small></span>{pinned && <Pin size={12} className="dm-pinned"/>}{dm.unread ? <b className="dm-badge">{dm.unread}</b> : null}</button><button className="dm-close-fixed" title={l("Закрыть личные сообщения", "Close DM")} onClick={(e) => { e.stopPropagation(); closeDm(dm.id); }}><X size={15}/></button></div>; })}</div>
     <VoiceConnectionPanel/>
@@ -411,10 +445,13 @@ function MessageList({ targetId, title, direct = false }: { targetId: string; ti
   return <div className="message-list" ref={listRef}><div className="channel-intro"><div className="intro-icon">{direct ? <AtSign size={34}/> : <Hash size={34}/>}</div><h1>{direct ? title : l(`Добро пожаловать в #${title}`, `Welcome to #${title}`)}</h1><p>{direct ? l(`Это начало истории личных сообщений с ${title}.`, `This is the beginning of your direct message history with ${title}.`) : l(`Это начало канала #${title}.`, `This is the start of the #${title} channel.`)}</p></div>{current.length === 0 && <div className="empty-chat">{l("Сообщений пока нет. Начни переписку.", "No messages here yet. Start the conversation.")}</div>}{current.map((message) => <MessageRow key={message.id} message={message} toggleReaction={toggleReaction} deleteMessage={deleteMessage}/>)}</div>;
 }
 
-function MessageRow({ message, toggleReaction, deleteMessage }: { message: Message; toggleReaction: (id: string, emoji: string) => void; deleteMessage: (id: string) => void }) {
+function MessageRow({ message, toggleReaction, deleteMessage }: { message: Message; toggleReaction: (id: string, emoji: string) => void; deleteMessage: (id: string, moderatorServerId?: string) => void }) {
   const editMessage = useMoonStore((s) => s.editMessage);
   const messages = useMoonStore((s) => s.messages);
   const members = useMoonStore((s) => s.members);
+  const servers = useMoonStore((s) => s.servers);
+  const activeServerId = useMoonStore((s) => s.activeServerId);
+  const currentUser = useMoonStore((s) => s.currentUser);
   const setReplyingTo = useMoonStore((s) => s.setReplyingTo);
   const togglePin = useMoonStore((s) => s.togglePin);
   const l = useL();
@@ -423,8 +460,10 @@ function MessageRow({ message, toggleReaction, deleteMessage }: { message: Messa
   const [draft, setDraft] = useState(message.body);
   const replied = message.replyTo ? messages.find((m) => m.id === message.replyTo) : undefined;
   const authorMember = message.authorId ? members.find((m) => m.id === message.authorId) : undefined;
+  const moderationServer = servers.find((server) => server.id === activeServerId && server.channels.some((channel) => channel.id === message.channelId));
+  const canModerateDelete = Boolean(!message.own && moderationServer && hasServerPermission(moderationServer, currentUser.id, "MANAGE_MESSAGES"));
   useEffect(() => setDraft(message.body), [message.body]);
-  return <article className={`message-row ${message.pinned ? "is-pinned" : ""}`} onContextMenu={(event) => { event.preventDefault(); setMenu(true); }}><Avatar label={authorMember?.avatar ?? message.avatar} memberId={authorMember?.id ?? message.authorId}/><div className="message-content">{replied && <div className="reply-preview"><MessageCircleReply size={13}/><strong>{replied.author}</strong><span>{replied.body || replied.attachment?.name}</span></div>}<div className="message-meta"><strong><NameStyle user={authorMember}>{authorMember?.name ?? message.author}</NameStyle>{authorMember && <UserBadges user={authorMember}/>}</strong><span>{message.timestamp}</span>{message.edited && <span>{l("(изменено)", "(edited)")}</span>}{message.pinned && <Pin size={12}/>}</div>{editing ? <input className="inline-edit" value={draft} onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { editMessage(message.id, draft); setEditing(false); } if (e.key === "Escape") { setDraft(message.body); setEditing(false); } }} autoFocus/> : message.body ? <p><LinkifiedText text={message.body}/></p> : null}{message.invite && <ServerInviteCard invite={message.invite}/>} {message.attachment && <AttachmentCard attachment={message.attachment}/>} {message.reactions && <div className="reaction-row">{Object.entries(message.reactions).map(([emoji, count]) => <button className={message.reacted?.includes(emoji) ? "reacted" : ""} key={emoji} onClick={() => toggleReaction(message.id, emoji)}>{emoji} <span>{count}</span></button>)}</div>}</div><div className="message-toolbar"><IconButton label={l("Добавить реакцию", "Add reaction")} onClick={() => toggleReaction(message.id, "👍")}><Laugh size={16}/></IconButton><IconButton label={l("Ответить", "Reply")} onClick={() => setReplyingTo(message.id)}><MessageCircleReply size={16}/></IconButton><IconButton label={message.pinned ? l("Открепить", "Unpin") : l("Закрепить", "Pin")} onClick={() => togglePin(message.id)}><Pin size={16}/></IconButton><IconButton label={l("Ещё", "More")} onClick={() => setMenu((v) => !v)}><MoreHorizontal size={17}/></IconButton></div>{menu && <div className="context-menu" onMouseLeave={() => setMenu(false)}><button onClick={() => { toggleReaction(message.id, "🔥"); setMenu(false); }}><Smile size={16}/> {l("Добавить реакцию", "Add Reaction")}</button><button onClick={() => { setReplyingTo(message.id); setMenu(false); }}><MessageCircleReply size={16}/> {l("Ответить", "Reply")}</button><button onClick={() => { togglePin(message.id); setMenu(false); }}><Pin size={16}/> {message.pinned ? l("Открепить сообщение", "Unpin Message") : l("Закрепить сообщение", "Pin Message")}</button><button onClick={() => navigator.clipboard?.writeText(message.body)}><Copy size={16}/> {l("Копировать текст", "Copy Text")}</button>{message.own && <button onClick={() => { setEditing(true); setMenu(false); }}><Pencil size={16}/> {l("Изменить сообщение", "Edit Message")}</button>}{message.own && <button className="danger" onClick={() => deleteMessage(message.id)}><Trash2 size={16}/> {l("Удалить сообщение", "Delete Message")}</button>}</div>}</article>;
+  return <article className={`message-row ${message.pinned ? "is-pinned" : ""}`} onContextMenu={(event) => { event.preventDefault(); setMenu(true); }}><Avatar label={authorMember?.avatar ?? message.avatar} memberId={authorMember?.id ?? message.authorId}/><div className="message-content">{replied && <div className="reply-preview"><MessageCircleReply size={13}/><strong>{replied.author}</strong><span>{replied.body || replied.attachment?.name}</span></div>}<div className="message-meta"><strong><NameStyle user={authorMember}>{authorMember?.name ?? message.author}</NameStyle>{authorMember && <UserBadges user={authorMember}/>}</strong><span>{message.timestamp}</span>{message.edited && <span>{l("(изменено)", "(edited)")}</span>}{message.pinned && <Pin size={12}/>}</div>{editing ? <input className="inline-edit" value={draft} onChange={(e) => setDraft(e.target.value)} onKeyDown={(e) => { if (e.key === "Enter") { editMessage(message.id, draft); setEditing(false); } if (e.key === "Escape") { setDraft(message.body); setEditing(false); } }} autoFocus/> : message.body ? <p><LinkifiedText text={message.body}/></p> : null}{message.invite && <ServerInviteCard invite={message.invite}/>} {message.attachment && <AttachmentCard attachment={message.attachment}/>} {message.reactions && <div className="reaction-row">{Object.entries(message.reactions).map(([emoji, count]) => <button className={message.reacted?.includes(emoji) ? "reacted" : ""} key={emoji} onClick={() => toggleReaction(message.id, emoji)}>{emoji} <span>{count}</span></button>)}</div>}</div><div className="message-toolbar"><IconButton label={l("Добавить реакцию", "Add reaction")} onClick={() => toggleReaction(message.id, "👍")}><Laugh size={16}/></IconButton><IconButton label={l("Ответить", "Reply")} onClick={() => setReplyingTo(message.id)}><MessageCircleReply size={16}/></IconButton><IconButton label={message.pinned ? l("Открепить", "Unpin") : l("Закрепить", "Pin")} onClick={() => togglePin(message.id)}><Pin size={16}/></IconButton><IconButton label={l("Ещё", "More")} onClick={() => setMenu((v) => !v)}><MoreHorizontal size={17}/></IconButton></div>{menu && <div className="context-menu" onMouseLeave={() => setMenu(false)}><button onClick={() => { toggleReaction(message.id, "🔥"); setMenu(false); }}><Smile size={16}/> {l("Добавить реакцию", "Add Reaction")}</button><button onClick={() => { setReplyingTo(message.id); setMenu(false); }}><MessageCircleReply size={16}/> {l("Ответить", "Reply")}</button><button onClick={() => { togglePin(message.id); setMenu(false); }}><Pin size={16}/> {message.pinned ? l("Открепить сообщение", "Unpin Message") : l("Закрепить сообщение", "Pin Message")}</button><button onClick={() => navigator.clipboard?.writeText(message.body)}><Copy size={16}/> {l("Копировать текст", "Copy Text")}</button>{message.own && <button onClick={() => { setEditing(true); setMenu(false); }}><Pencil size={16}/> {l("Изменить сообщение", "Edit Message")}</button>}{(message.own || canModerateDelete) && <button className="danger" onClick={() => { void deleteMessage(message.id, canModerateDelete ? activeServerId : undefined); setMenu(false); }}><Trash2 size={16}/> {l("Удалить сообщение", "Delete Message")}</button>}</div>}</article>;
 }
 
 function ServerInviteCard({ invite }: { invite: { code: string; serverId: string; serverName: string } }) {
@@ -492,10 +531,25 @@ function MemberSidebar() {
   const servers = useMoonStore((s) => s.servers);
   const activeServerId = useMoonStore((s) => s.activeServerId);
   const currentUser = useMoonStore((s) => s.currentUser);
+  const createDm = useMoonStore((s) => s.createDm);
+  const banServerMember = useMoonStore((s) => s.banServerMember);
+  const muteServerMember = useMoonStore((s) => s.muteServerMember);
   const l = useL();
   const [profile, setProfile] = useState<string | null>(null);
+  const [context, setContext] = useState<{ memberId: string; x: number; y: number } | null>(null);
   const server = servers.find((item) => item.id === activeServerId);
   const allowed = members.filter((member) => member.id === server?.ownerId || server?.memberIds?.includes(member.id));
+  const contextMember = context ? members.find((member) => member.id === context.memberId) : undefined;
+
+  useEffect(() => {
+    if (!context) return;
+    const close = () => setContext(null);
+    const key = (event: globalThis.KeyboardEvent) => { if (event.key === "Escape") close(); };
+    window.addEventListener("click", close);
+    window.addEventListener("keydown", key);
+    return () => { window.removeEventListener("click", close); window.removeEventListener("keydown", key); };
+  }, [context]);
+
   if (!server) return null;
   const roles = [...(server.roles ?? [])].sort((a,b)=>b.position-a.position);
   const assignedRoles = (memberId:string) => roles.filter((role)=>server.roleAssignments?.[memberId]?.includes(role.id));
@@ -509,7 +563,22 @@ function MemberSidebar() {
     else add("90-online",l("В СЕТИ","ONLINE"),member);
   }
   const groups=[...grouped.entries()].sort(([a],[b])=>a.localeCompare(b));
-  return <aside className="member-sidebar">{groups.map(([key,group])=><section className="member-group" key={key}><h3 style={group.color?{color:group.color}:undefined}>{group.label} — {group.items.length}</h3>{group.items.map((member)=>{const topRole=assignedRoles(member.id)[0];return <button key={member.id} className={`member-item ${member.status === "offline" ? "offline" : ""}`} onClick={() => setProfile(member.id)}><Avatar label={member.avatar} status={member.status} memberId={member.id}/><span><strong style={topRole?{color:topRole.color}:undefined}><NameStyle user={member}>{member.id === currentUser.id ? `${member.name} ${l("(вы)", "(you)")}` : member.name}</NameStyle><UserBadges user={member}/></strong><small>{topRole?.name ?? member.activity ?? `@${member.username ?? member.name.toLowerCase()}`}</small></span></button>;})}</section>)}{profile && <ProfilePopout memberId={profile} close={() => setProfile(null)}/>}</aside>;
+  const canBan = hasServerPermission(server, currentUser.id, "BAN_MEMBERS");
+  const canMute = hasServerPermission(server, currentUser.id, "MANAGE_MESSAGES");
+  const canModerateContext = Boolean(contextMember && contextMember.id !== currentUser.id && contextMember.id !== server.ownerId);
+
+  return <aside className="member-sidebar">
+    {groups.map(([key,group])=><section className="member-group" key={key}><h3 style={group.color?{color:group.color}:undefined}>{group.label} — {group.items.length}</h3>{group.items.map((member)=>{const topRole=assignedRoles(member.id)[0];return <button key={member.id} className={`member-item ${member.status === "offline" ? "offline" : ""}`} onClick={() => setProfile(member.id)} onContextMenu={(event) => { event.preventDefault(); event.stopPropagation(); setContext({ memberId: member.id, x: event.clientX, y: event.clientY }); }}><Avatar label={member.avatar} status={member.status} memberId={member.id}/><span><strong style={topRole?{color:topRole.color}:undefined}><NameStyle user={member}>{member.id === currentUser.id ? `${member.name} ${l("(вы)", "(you)")}` : member.name}</NameStyle><UserBadges user={member}/></strong><small>{topRole?.name ?? member.activity ?? `@${member.username ?? member.name.toLowerCase()}`}</small></span></button>;})}</section>)}
+    {profile && <ProfilePopout memberId={profile} close={() => setProfile(null)}/>}
+    {context && contextMember && <div className="context-menu member-context-menu" style={{ left: Math.min(context.x, window.innerWidth - 230), top: Math.min(context.y, window.innerHeight - 250) }} onClick={(event) => event.stopPropagation()}>
+      <div className="context-title">{contextMember.name}</div>
+      {contextMember.id !== currentUser.id && <button onClick={() => { void createDm(contextMember.id); setContext(null); }}><MessageCircle size={16}/> {l("Написать сообщение", "Message")}</button>}
+      <button onClick={() => { setContext(null); window.dispatchEvent(new CustomEvent("moon:open-profile", { detail: { memberId: contextMember.id } })); }}><UserCheck size={16}/> {l("Открыть профиль", "Open Profile")}</button>
+      {canModerateContext && (canBan || canMute) && <div className="context-separator"/>}
+      {canModerateContext && canMute && <button onClick={() => { setContext(null); void muteServerMember(server.id, contextMember.id, 60).then((result) => { if (!result.ok) alert(result.message); }); }}><MicOff size={16}/> {l("Выдать мут на 1 час", "Mute for 1 hour")}</button>}
+      {canModerateContext && canBan && <button className="danger" onClick={() => { if (window.confirm(`${l("Заблокировать", "Ban")} ${contextMember.name}?`)) void banServerMember(server.id, contextMember.id).then((result) => { if (!result.ok) alert(result.message); }); setContext(null); }}><Ban size={16}/> {l("Заблокировать на сервере", "Ban from Server")}</button>}
+    </div>}
+  </aside>;
 }
 
 function ProfilePopout({ memberId, close }: { memberId: string; close: () => void }) {
@@ -521,7 +590,7 @@ function ProfilePopout({ memberId, close }: { memberId: string; close: () => voi
   const l = useL();
   if (!member) return null;
   const gradient = member.profileGradient ?? { from: "#5865f2", to: "#7c3aed", angle: 135 };
-  return <div className="profile-popout" style={{ "--profile-from": gradient.from, "--profile-to": gradient.to } as CSSProperties}><BannerMedia className="profile-banner" src={member.banner}/><button className="profile-close" onClick={close}><X size={15}/></button><div className="profile-avatar"><Avatar label={member.avatar} status={member.status} large memberId={member.id}/></div><div className="profile-body"><h2><NameStyle user={member}>{member.name}</NameStyle><UserBadges user={member}/></h2><p>@{member.username ?? member.name.toLowerCase()}</p>{developerMode && <div className="profile-id">ID: {member.id}<button onClick={() => navigator.clipboard?.writeText(member.id)}><Copy size={12}/></button></div>}<hr/><h4>{l("ОБО МНЕ", "ABOUT ME")}</h4><div className="profile-bio-links"><LinkifiedText text={member.bio}/></div>{member.id !== currentUser.id && <><button className="profile-message" onClick={() => { void createDm(member.id); close(); }}>{l("Сообщение", "Message")}</button><button className="secondary-button full-button" onClick={() => void sendFriendRequest(member.username ?? member.name)}>{l("Добавить в друзья", "Add Friend")}</button></>}</div></div>;
+  return <div className="profile-popout" style={{ "--profile-from": gradient.from, "--profile-to": gradient.to } as CSSProperties}><BannerMedia className="profile-banner" src={member.banner}/><button className="profile-close" onClick={close}><X size={15}/></button><div className="profile-avatar"><Avatar label={member.avatar} status={member.status} large memberId={member.id}/></div><div className="profile-body"><h2><NameStyle user={member}>{member.name}</NameStyle><UserBadges user={member}/></h2><p>@{member.username ?? member.name.toLowerCase()}</p>{developerMode && <div className="profile-id">ID: {member.id}<button onClick={() => navigator.clipboard?.writeText(member.id)}><Copy size={12}/></button></div>}<div className="profile-created"><small>{l("АККАУНТ СОЗДАН", "ACCOUNT CREATED")}</small><strong>{formatAccountDate(member.createdAt)}</strong></div><hr/><h4>{l("ОБО МНЕ", "ABOUT ME")}</h4><div className="profile-bio-links"><LinkifiedText text={member.bio}/></div>{member.id !== currentUser.id && <><button className="profile-message" onClick={() => { void createDm(member.id); close(); }}>{l("Сообщение", "Message")}</button><button className="secondary-button full-button" onClick={() => void sendFriendRequest(member.username ?? member.name)}>{l("Добавить в друзья", "Add Friend")}</button></>}</div></div>;
 }
 
 function FriendsScreen() {
@@ -574,7 +643,7 @@ function DmProfileSidebar({ member }: { member: Member }) {
   const mutualServers = servers.filter((server) => (server.ownerId === currentUser.id || server.memberIds?.includes(currentUser.id ?? "")) && (server.ownerId === member.id || server.memberIds?.includes(member.id))).length;
   const isFriend = friends.some((friend) => friend.id === member.id && friend.relation === "friend");
   const gradient = member.profileGradient ?? { from: "#5865f2", to: "#7c3aed", angle: 135 };
-  return <aside className="dm-profile-sidebar" style={{ "--profile-from": gradient.from, "--profile-to": gradient.to } as CSSProperties}><BannerMedia className="dm-profile-banner" src={member.banner}/><div className="dm-profile-avatar"><Avatar label={member.avatar} status={member.status} large memberId={member.id}/></div><div className="dm-profile-content"><h2><NameStyle user={member}>{member.name}</NameStyle><UserBadges user={member}/></h2><p>@{member.username ?? member.name.toLowerCase()}</p><div className="dm-profile-meta"><span>{isFriend ? l("✓ В друзьях", "✓ Friends") : l("Не в друзьях", "Not friends")}</span><span>{mutualServers} {l("общих серверов", "Mutual Servers")}</span></div><hr/><h4>{l("ОБО МНЕ", "ABOUT ME")}</h4><div className="profile-bio-links"><LinkifiedText text={member.bio}/></div>{developerMode && <><h4>USER ID</h4><button className="copy-id-row" onClick={() => navigator.clipboard?.writeText(member.id)}><code>{member.id}</code><Copy size={13}/></button></>}{!isFriend && <button className="secondary-button full-button" onClick={() => void sendFriendRequest(member.username ?? member.name)}>{l("Добавить в друзья", "Add Friend")}</button>}</div></aside>;
+  return <aside className="dm-profile-sidebar" style={{ "--profile-from": gradient.from, "--profile-to": gradient.to } as CSSProperties}><BannerMedia className="dm-profile-banner" src={member.banner}/><div className="dm-profile-avatar"><Avatar label={member.avatar} status={member.status} large memberId={member.id}/></div><div className="dm-profile-content"><h2><NameStyle user={member}>{member.name}</NameStyle><UserBadges user={member}/></h2><p>@{member.username ?? member.name.toLowerCase()}</p><div className="dm-profile-meta"><span>{isFriend ? l("✓ В друзьях", "✓ Friends") : l("Не в друзьях", "Not friends")}</span><span>{mutualServers} {l("общих серверов", "Mutual Servers")}</span></div><div className="profile-created"><small>{l("АККАУНТ СОЗДАН", "ACCOUNT CREATED")}</small><strong>{formatAccountDate(member.createdAt)}</strong></div><hr/><h4>{l("ОБО МНЕ", "ABOUT ME")}</h4><div className="profile-bio-links"><LinkifiedText text={member.bio}/></div>{developerMode && <><h4>USER ID</h4><button className="copy-id-row" onClick={() => navigator.clipboard?.writeText(member.id)}><code>{member.id}</code><Copy size={13}/></button></>}{!isFriend && <button className="secondary-button full-button" onClick={() => void sendFriendRequest(member.username ?? member.name)}>{l("Добавить в друзья", "Add Friend")}</button>}</div></aside>;
 }
 
 function DirectMessageChat({ dmId }: { dmId: string }) {
@@ -891,7 +960,7 @@ function DmCallStage({ call }: { call: CallSession }) {
   const peerVideo = Boolean(peerState?.camera || peerState?.screen);
   const localVideoOn = Boolean(camera || screen);
 
-  return <div className="dm-call-stage"><audio ref={remoteAudio} autoPlay/><div className="dm-call-status"><span className={`call-connection ${connection}`}><i/>{outgoing ? l("Звоним…", "Calling…") : connection === "connected" ? `${l("Подключено", "Connected")} · ${duration}` : connection === "failed" ? l("Не удалось подключить медиа.", "Media connection failed.") : l("Подключение…", "Connecting…")}</span>{mediaError && <span className="call-media-error">{mediaError}</span>}</div><div className="dm-call-people"><div className={`dm-call-person ${peerSpeaking && !peerState?.muted ? "speaking" : ""} ${peerVideo ? "has-video" : "avatar-only"} ${peerState?.screen ? "screen-sharing" : ""}`}><video ref={remoteVideo} autoPlay playsInline muted className={peerVideo ? "" : "call-video-hidden"} title={l("Двойной клик — на весь экран", "Double-click for fullscreen")} onDoubleClick={(e) => void e.currentTarget.requestFullscreen?.()}/>{!peerVideo && <CallAvatar label={peer?.avatar ?? "?"} name={peer?.name ?? l("Пользователь", "User")}/>}<span><NameStyle user={peer}>{peer?.name ?? l("Пользователь", "User")}</NameStyle><UserBadges user={peer ?? {}}/></span><div className="peer-media-badges">{peerState?.screen && <MonitorUp size={15}/>} {peerState?.muted && <MicOff size={15}/>} {peerState?.deafened && <VolumeX size={15}/>}</div></div><div className={`dm-call-person local ${localSpeaking && !muted ? "speaking" : ""} ${localVideoOn ? "has-video" : "avatar-only"} ${screen ? "screen-sharing" : ""}`}><video ref={localVideo} muted autoPlay playsInline className={localVideoOn ? "" : "call-video-hidden"} title={l("Двойной клик — на весь экран", "Double-click for fullscreen")} onDoubleClick={(e) => void e.currentTarget.requestFullscreen?.()}/>{!localVideoOn && <CallAvatar label={currentUser.avatar} name={currentUser.displayName}/>}<span><NameStyle user={currentUser}>{currentUser.displayName}</NameStyle><UserBadges user={currentUser}/></span></div></div><div className="dm-call-controls"><button className={muted ? "active" : ""} title={muted ? l("Включить микрофон", "Unmute") : l("Выключить микрофон", "Mute")} onClick={toggleMute}>{muted ? <MicOff size={20}/> : <Mic size={20}/>}</button><button className={deafened ? "active" : ""} title={deafened ? l("Включить звук", "Undeafen") : l("Отключить звук", "Deafen")} onClick={toggleDeafen}>{deafened ? <VolumeX size={20}/> : <Headphones size={20}/>}</button><button className={camera ? "active" : ""} title={l("Камера", "Camera")} onClick={() => void toggleCamera()}>{camera ? <Video size={20}/> : <VideoOff size={20}/>}</button><button className={screen ? "active" : ""} title={l("Демонстрация экрана", "Share Screen")} onClick={() => void toggleScreen()}><MonitorUp size={20}/></button><button className="hangup" title={l("Завершить звонок", "End Call")} onClick={() => endCall(call.id)}><PhoneOff size={20}/></button></div></div>;
+  return <div className="dm-call-stage"><audio ref={remoteAudio} autoPlay/><div className="dm-call-status"><span className={`call-connection ${connection}`}><i/>{outgoing ? l("Звоним…", "Calling…") : connection === "connected" ? `${l("Подключено", "Connected")} · ${duration}` : connection === "failed" ? l("Не удалось подключить медиа.", "Media connection failed.") : l("Подключение…", "Connecting…")}</span>{mediaError && <span className="call-media-error">{mediaError}</span>}</div><div className="dm-call-people"><div className={`dm-call-person ${outgoing ? "ringing-peer" : ""} ${peerSpeaking && !peerState?.muted ? "speaking" : ""} ${peerVideo ? "has-video" : "avatar-only"} ${peerState?.screen ? "screen-sharing" : ""}`}><video ref={remoteVideo} autoPlay playsInline muted className={peerVideo ? "" : "call-video-hidden"} title={l("Двойной клик — на весь экран", "Double-click for fullscreen")} onDoubleClick={(e) => void e.currentTarget.requestFullscreen?.()}/>{!peerVideo && <CallAvatar label={peer?.avatar ?? "?"} name={peer?.name ?? l("Пользователь", "User")}/>}<span><NameStyle user={peer}>{peer?.name ?? l("Пользователь", "User")}</NameStyle><UserBadges user={peer ?? {}}/></span><div className="peer-media-badges">{peerState?.screen && <MonitorUp size={15}/>} {peerState?.muted && <MicOff size={15}/>} {peerState?.deafened && <VolumeX size={15}/>}</div></div><div className={`dm-call-person local ${localSpeaking && !muted ? "speaking" : ""} ${localVideoOn ? "has-video" : "avatar-only"} ${screen ? "screen-sharing" : ""}`}><video ref={localVideo} muted autoPlay playsInline className={localVideoOn ? "" : "call-video-hidden"} title={l("Двойной клик — на весь экран", "Double-click for fullscreen")} onDoubleClick={(e) => void e.currentTarget.requestFullscreen?.()}/>{!localVideoOn && <CallAvatar label={currentUser.avatar} name={currentUser.displayName}/>}<span><NameStyle user={currentUser}>{currentUser.displayName}</NameStyle><UserBadges user={currentUser}/></span></div></div><div className="dm-call-controls"><button className={muted ? "active" : ""} title={muted ? l("Включить микрофон", "Unmute") : l("Выключить микрофон", "Mute")} onClick={toggleMute}>{muted ? <MicOff size={20}/> : <Mic size={20}/>}</button><button className={deafened ? "active" : ""} title={deafened ? l("Включить звук", "Undeafen") : l("Отключить звук", "Deafen")} onClick={toggleDeafen}>{deafened ? <VolumeX size={20}/> : <Headphones size={20}/>}</button><button className={camera ? "active" : ""} title={l("Камера", "Camera")} onClick={() => void toggleCamera()}>{camera ? <Video size={20}/> : <VideoOff size={20}/>}</button><button className={screen ? "active" : ""} title={l("Демонстрация экрана", "Share Screen")} onClick={() => void toggleScreen()}><MonitorUp size={20}/></button><button className="hangup" title={l("Завершить звонок", "End Call")} onClick={() => endCall(call.id)}><PhoneOff size={20}/></button></div></div>;
 }
 
 
@@ -1030,7 +1099,7 @@ function ToggleSetting({ title, description, checked, onChange }: { title: strin
   return <label className="settings-toggle"><span><strong>{title}</strong><small>{description}</small></span><input type="checkbox" checked={checked} onChange={(e) => onChange(e.target.checked)}/></label>;
 }
 
-function SettingsModal({ close, initialPage }: { close: () => void; initialPage: string }) {
+function SettingsModal({ close, initialPage, onPageChange }: { close: () => void; initialPage: string; onPageChange?: (page: string) => void }) {
   const theme = useMoonStore((s) => s.theme);
   const setTheme = useMoonStore((s) => s.setTheme);
   const currentUser = useMoonStore((s) => s.currentUser);
@@ -1048,8 +1117,10 @@ function SettingsModal({ close, initialPage }: { close: () => void; initialPage:
   ] as Array<[string,string]>;
   if (currentUser.developer) basePages.push(["Admin", l("Админ-панель", "Admin Panel")]);
   const title = basePages.find(([id]) => id === page)?.[1] ?? page;
+  const selectPage = (nextPage: string) => { setPage(nextPage); onPageChange?.(nextPage); };
+  useEffect(() => { setPage(initialPage); }, [initialPage]);
   useEffect(() => { const handler = (e: globalThis.KeyboardEvent) => e.key === "Escape" && close(); window.addEventListener("keydown", handler); return () => window.removeEventListener("keydown", handler); }, [close]);
-  return <div className="settings-screen"><aside><div className="settings-nav"><h4>{l("НАСТРОЙКИ ПОЛЬЗОВАТЕЛЯ", "USER SETTINGS")}</h4>{basePages.map(([id, label]) => <button key={id} className={`${page === id ? "active" : ""} ${id === "Admin" ? "admin-nav-item" : ""}`} onClick={() => setPage(id)}>{id === "Admin" && <Shield size={14}/>} {label}</button>)}</div></aside><main><button className="settings-close" onClick={close}><X size={22}/><small>ESC</small></button><div className="settings-content"><h1>{title}</h1>{page === "My Account" ? <AccountSettings openProfile={() => setPage("Profiles")}/> : page === "Profiles" ? <ProfileEditor/> : page === "Appearance" ? <AppearanceSettings theme={theme} setTheme={setTheme}/> : page === "Voice & Video" ? <VoiceSettings/> : page === "Notifications" ? <NotificationSettings/> : page === "Privacy & Safety" ? <PrivacySettings/> : page === "Language" ? <LanguageSettings/> : page === "Admin" && currentUser.developer ? <AdminPanel/> : <DeveloperSettings/>}</div></main></div>;
+  return <div className="settings-screen"><aside><div className="settings-nav"><h4>{l("НАСТРОЙКИ ПОЛЬЗОВАТЕЛЯ", "USER SETTINGS")}</h4>{basePages.map(([id, label]) => <button key={id} className={`${page === id ? "active" : ""} ${id === "Admin" ? "admin-nav-item" : ""}`} onClick={() => selectPage(id)}>{id === "Admin" && <Shield size={14}/>} {label}</button>)}</div></aside><main><button className="settings-close" onClick={close}><X size={22}/><small>ESC</small></button><div className="settings-content"><h1>{title}</h1>{page === "My Account" ? <AccountSettings openProfile={() => selectPage("Profiles")}/> : page === "Profiles" ? <ProfileEditor/> : page === "Appearance" ? <AppearanceSettings theme={theme} setTheme={setTheme}/> : page === "Voice & Video" ? <VoiceSettings/> : page === "Notifications" ? <NotificationSettings/> : page === "Privacy & Safety" ? <PrivacySettings/> : page === "Language" ? <LanguageSettings/> : page === "Admin" && currentUser.developer ? <AdminPanel/> : <DeveloperSettings/>}</div></main></div>;
 }
 
 function AppearanceSettings({ theme, setTheme }: { theme: MoonTheme; setTheme: (theme: MoonTheme) => void }) {
@@ -1136,13 +1207,22 @@ function AdminPanel() {
   const [note, setNote] = useState("");
   const [busy, setBusy] = useState(false);
   const supabase = getSupabaseBrowserClient();
-  const run = async (work: () => Promise<void>) => { setBusy(true); setNote(""); try { await work(); } catch (error) { setNote(error instanceof Error ? error.message : String(error)); } finally { setBusy(false); } };
-  const refreshBans = async () => { if (!supabase) return; const { data, error } = await supabase.from("moderation_bans").select("id,target_type,target_id,reason,created_at,expires_at,revoked_at").is("revoked_at", null).order("created_at", { ascending: false }).limit(100); if (!error) setBans((data ?? []) as BanRow[]); };
-  useEffect(() => { void refreshBans(); }, []);
+  const run = async (work: () => Promise<void>) => { setBusy(true); setNote(""); try { await work(); } catch (error) { setNote(readableError(error)); } finally { setBusy(false); } };
+  const refreshBans = async () => { if (!supabase) return; const { data, error } = await supabase.from("moderation_bans").select("id,target_type,target_id,reason,created_at,expires_at,revoked_at").is("revoked_at", null).order("created_at", { ascending: false }).limit(100); if (error) throw new Error(readableError(error)); setBans((data ?? []) as BanRow[]); };
+  const refreshProfile = async (userId: string) => {
+    if (!supabase) return;
+    const { data, error } = await supabase.from("profiles").select("*").eq("id", userId).maybeSingle();
+    if (error) throw new Error(readableError(error));
+    if (!data) return;
+    const member = profileToMember(data as any);
+    useMoonStore.setState((state) => ({ members: state.members.some((item) => item.id === member.id) ? state.members.map((item) => item.id === member.id ? member : item) : [...state.members, member] }));
+    if (userId === currentUser.id) setCurrentUser(profileToCurrentUser(data as any));
+  };
+  useEffect(() => { void refreshBans().catch((error) => setNote(readableError(error))); }, []);
   if (!currentUser.developer) return <div className="auth-error">403</div>;
-  const rpc = async (name: string, args: Record<string, unknown>) => { if (!supabase) throw new Error("Supabase unavailable"); const { error } = await supabase.rpc(name, args); if (error) throw error; };
+  const rpc = async (name: string, args: Record<string, unknown>) => { if (!supabase) throw new Error("Supabase unavailable"); const { error } = await supabase.rpc(name, args); if (error) throw new Error(readableError(error)); };
   const ban = () => run(async () => { if (!targetId.trim()) throw new Error(l("Укажи ID цели.", "Enter a target ID.")); await rpc("moon_admin_ban", { target_kind: targetType, target: targetId.trim(), reason_text: reason.trim() || null, duration_hours: Math.max(0, Number(duration) || 0) }); setNote(l("Блокировка создана.", "Ban created.")); setTargetId(""); await refreshBans(); });
-  const setPlus = (enabled: boolean) => run(async () => { if (!plusUserId.trim()) throw new Error(l("Укажи User ID.", "Enter a User ID.")); await rpc("moon_admin_set_plus", { target_user_id: plusUserId.trim(), enabled }); setNote(enabled ? l("PLUS выдан.", "PLUS granted.") : l("PLUS снят.", "PLUS removed.")); });
+  const setPlus = (enabled: boolean) => run(async () => { const id = plusUserId.trim(); if (!id) throw new Error(l("Укажи User ID.", "Enter a User ID.")); await rpc("moon_admin_set_plus", { target_user_id: id, enabled }); await refreshProfile(id); setNote(enabled ? l("PLUS выдан.", "PLUS granted.") : l("PLUS снят.", "PLUS removed.")); });
   const moderateMedia = () => run(async () => { if (!mediaUserId.trim()) throw new Error(l("Укажи User ID.", "Enter a User ID.")); if (!removeAvatar && !removeBanner) throw new Error(l("Выбери аватар или баннер.", "Select avatar or banner.")); await rpc("moon_admin_moderate_profile", { target_user_id: mediaUserId.trim(), remove_avatar: removeAvatar, remove_banner: removeBanner, reason_text: mediaReason.trim() || l("Нарушение правил MoonLobby", "MoonLobby policy violation") }); setNote(l("Профиль модерирован. Пользователь увидит причину при входе.", "Profile moderated. The user will see the reason at sign-in.")); });
   const saveGradient = () => run(async () => { await rpc("moon_admin_set_name_gradient", { color_from: gradientFrom, color_to: gradientTo }); const profile = await getMyRemoteProfile(); if (profile) setCurrentUser(profileToCurrentUser(profile)); setNote(l("Градиент никнейма сохранён.", "Nickname gradient saved.")); });
   return <div className="admin-panel"><div className="admin-warning"><ShieldCheck size={20}/><span><strong>{l("Администрирование MoonLobby", "MoonLobby Administration")}</strong><small>{l("Все действия выполняются через защищённые SECURITY DEFINER RPC и требуют developer=true.", "Actions use protected SECURITY DEFINER RPCs and require developer=true.")}</small></span></div>{note && <div className={`profile-save-note ${/error|ошиб|invalid|not|failed|denied/i.test(note) ? "error-note" : ""}`}>{note}</div>}<div className="admin-grid">
@@ -1174,7 +1254,7 @@ function ProfileEditor() {
     void uploadLocalImage(file, kind).then((url) => { if (kind === "avatar") setAvatar(url); else setBanner(url); setNote(l("Изображение загружено. Нажми «Сохранить профиль».", "Image uploaded. Click Save Profile.")); }).catch((error) => setNote(error instanceof Error ? error.message : l("Не удалось загрузить изображение.", "Could not upload image.")));
   };
   const save = () => { const result = updateProfile({ displayName, username, bio, avatar, banner: banner || undefined, profileGradient: { from, to, angle: 180 } }); setNote(result.ok ? l("Профиль сохранён и синхронизирован.", "Profile saved and synced.") : result.message ?? l("Не удалось сохранить профиль.", "Could not save profile.")); };
-  return <div className="profile-editor-layout"><div className="profile-editor-form"><label className="field-label">{l("ОТОБРАЖАЕМОЕ ИМЯ", "DISPLAY NAME")}<input value={displayName} onChange={(e) => setDisplayName(e.target.value)}/></label><label className="field-label">USERNAME<input value={username} onChange={(e) => setUsername(e.target.value)}/></label><label className="field-label">{l("ОБО МНЕ", "ABOUT ME")}<textarea value={bio} maxLength={300} onChange={(e) => setBio(e.target.value)} placeholder={l("Ссылки https://... в профиле будут кликабельными.", "Links like https://... are clickable in your profile.")}/></label><div className="profile-upload-grid"><label className="upload-button"><ImageIcon size={17}/> {l("Сменить аватар", "Change Avatar")}<input type="file" accept="image/*,.gif" onChange={(e) => upload("avatar", e.target.files?.[0])}/></label><label className="upload-button"><ImageIcon size={17}/> {l("Сменить баннер", "Change Banner")}<input type="file" accept="image/*,.gif" onChange={(e) => upload("banner", e.target.files?.[0])}/></label></div><div className="gradient-editor"><h3><Palette size={16}/> {l("ФОН ПРОФИЛЯ", "PROFILE BACKGROUND")}</h3><p className="settings-description">{l("Градиент идёт сверху вниз, как фон профиля Discord.", "The gradient runs top-to-bottom as the profile background.")}</p><label>{l("Верх", "Top")} <input type="color" value={from} onChange={(e) => setFrom(e.target.value)}/></label><label>{l("Низ", "Bottom")} <input type="color" value={to} onChange={(e) => setTo(e.target.value)}/></label></div><div className={`plus-profile-controls ${currentUser.plus ? "" : "locked"}`}><h3><Crown size={16}/> {l("СТИЛЬ НИКНЕЙМА PLUS", "PLUS NICKNAME STYLE")}</h3><label>{l("Цвет", "Color")}<input type="color" disabled={!currentUser.plus} value={currentUser.nicknameColor ?? "#f2f3f5"} onChange={(e) => setPlusStyle({ nicknameColor: e.target.value })}/></label><label>{l("Шрифт", "Font")}<select disabled={!currentUser.plus} value={currentUser.nicknameFont ?? "default"} onChange={(e) => setPlusStyle({ nicknameFont: e.target.value as any })}><option value="default">Default</option><option value="serif">Serif</option><option value="mono">Mono</option><option value="rounded">Rounded</option></select></label>{!currentUser.plus && <small><Crown size={12}/> {l("Доступно только подписчикам Moon Plus", "Available to Moon Plus subscribers only")}</small>}<div className="plus-style-live"><NameStyle user={currentUser}>{displayName || currentUser.displayName}</NameStyle><UserBadges user={currentUser}/></div></div>{note && <div className="profile-save-note">{note}</div>}<button className="primary-button profile-save" onClick={save}><Save size={17}/> {l("Сохранить профиль", "Save Profile")}</button></div><div className="profile-preview-wrap"><h4>{l("ПРЕДПРОСМОТР", "PREVIEW")}</h4><div className="profile-preview-card" style={{ background: `linear-gradient(180deg, ${from}, ${to})` }}><BannerMedia className="profile-preview-banner" src={banner || undefined}/><div className="profile-preview-body"><Avatar label={avatar} status="online" large memberId={currentUser.id}/><h2><NameStyle user={currentUser}>{displayName || l("Отображаемое имя", "Display Name")}</NameStyle><UserBadges user={currentUser}/></h2><p>@{username || "username"}</p><hr/><h4>{l("ОБО МНЕ", "ABOUT ME")}</h4><div className="profile-bio-links"><LinkifiedText text={bio}/></div></div></div></div></div>;
+  return <div className="profile-editor-layout"><div className="profile-editor-form"><label className="field-label">{l("ОТОБРАЖАЕМОЕ ИМЯ", "DISPLAY NAME")}<input value={displayName} onChange={(e) => setDisplayName(e.target.value)}/></label><label className="field-label">USERNAME<input value={username} onChange={(e) => setUsername(e.target.value)}/></label><label className="field-label">{l("ОБО МНЕ", "ABOUT ME")}<textarea value={bio} maxLength={300} onChange={(e) => setBio(e.target.value)} placeholder={l("Ссылки https://... в профиле будут кликабельными.", "Links like https://... are clickable in your profile.")}/></label><div className="profile-upload-grid"><label className="upload-button"><ImageIcon size={17}/> {l("Сменить аватар", "Change Avatar")}<input type="file" accept="image/*,.gif" onChange={(e) => upload("avatar", e.target.files?.[0])}/></label><label className="upload-button"><ImageIcon size={17}/> {l("Сменить баннер", "Change Banner")}<input type="file" accept="image/*,.gif" onChange={(e) => upload("banner", e.target.files?.[0])}/></label></div><div className="gradient-editor"><h3><Palette size={16}/> {l("ФОН ПРОФИЛЯ", "PROFILE BACKGROUND")}</h3><p className="settings-description">{l("Градиент идёт сверху вниз, как фон профиля Discord.", "The gradient runs top-to-bottom as the profile background.")}</p><label>{l("Верх", "Top")} <input type="color" value={from} onChange={(e) => setFrom(e.target.value)}/></label><label>{l("Низ", "Bottom")} <input type="color" value={to} onChange={(e) => setTo(e.target.value)}/></label></div><div className={`plus-profile-controls ${currentUser.plus ? "" : "locked"}`}><h3><Crown size={16}/> {l("СТИЛЬ НИКНЕЙМА PLUS", "PLUS NICKNAME STYLE")}</h3>{currentUser.plus && <><ToggleSetting title={l("Использовать цвет PLUS", "Use PLUS nickname color")} description={l("Можно отключить цвет, не отключая подписку.", "Disable the color without disabling PLUS.")} checked={currentUser.nicknameColorEnabled !== false} onChange={(value) => setPlusStyle({ nicknameColorEnabled: value })}/><ToggleSetting title={l("Использовать шрифт PLUS", "Use PLUS nickname font")} description={l("Можно оставить обычный шрифт при активном PLUS.", "Keep the normal font while PLUS remains active.")} checked={currentUser.nicknameFontEnabled !== false} onChange={(value) => setPlusStyle({ nicknameFontEnabled: value })}/></>}<label>{l("Цвет", "Color")}<input type="color" disabled={!currentUser.plus || currentUser.nicknameColorEnabled === false} value={currentUser.nicknameColor ?? "#f2f3f5"} onChange={(e) => setPlusStyle({ nicknameColor: e.target.value })}/></label><label>{l("Шрифт", "Font")}<select disabled={!currentUser.plus || currentUser.nicknameFontEnabled === false} value={currentUser.nicknameFont ?? "default"} onChange={(e) => setPlusStyle({ nicknameFont: e.target.value as any })}><option value="default">Default</option><option value="serif">Serif</option><option value="mono">Mono</option><option value="rounded">Rounded</option></select></label>{!currentUser.plus && <small><Crown size={12}/> {l("Доступно только подписчикам Moon Plus", "Available to Moon Plus subscribers only")}</small>}<div className="plus-style-live"><NameStyle user={currentUser}>{displayName || currentUser.displayName}</NameStyle><UserBadges user={currentUser}/></div></div>{note && <div className="profile-save-note">{note}</div>}<button className="primary-button profile-save" onClick={save}><Save size={17}/> {l("Сохранить профиль", "Save Profile")}</button></div><div className="profile-preview-wrap"><h4>{l("ПРЕДПРОСМОТР", "PREVIEW")}</h4><div className="profile-preview-card" style={{ background: `linear-gradient(180deg, ${from}, ${to})` }}><BannerMedia className="profile-preview-banner" src={banner || undefined}/><div className="profile-preview-body"><Avatar label={avatar} status="online" large memberId={currentUser.id}/><h2><NameStyle user={currentUser}>{displayName || l("Отображаемое имя", "Display Name")}</NameStyle><UserBadges user={currentUser}/></h2><p>@{username || "username"}</p><hr/><h4>{l("ОБО МНЕ", "ABOUT ME")}</h4><div className="profile-bio-links"><LinkifiedText text={bio}/></div></div></div></div></div>;
 }
 
 function AccountSettings({ openProfile }: { openProfile: () => void }) {
@@ -1204,7 +1284,7 @@ function AccountSettings({ openProfile }: { openProfile: () => void }) {
       setPasswordResetBusy(false);
     }
   };
-  return <><div className="account-card" style={{ background: `linear-gradient(180deg,${gradient.from},${gradient.to})` }}><BannerMedia className="account-banner" src={currentUser.banner}/><div className="account-info"><Avatar label={currentUser.avatar} status="online" large/><h2><NameStyle user={currentUser}>{currentUser.displayName}</NameStyle><UserBadges user={currentUser}/></h2><p>@{currentUser.username}</p><button className="primary-button small" onClick={openProfile}>{l("Редактировать профиль", "Edit User Profile")}</button></div></div>{developerMode && <div className="settings-panel"><strong>USER ID</strong><span>{streamerMode ? l("Скрыто режимом стримера", "Hidden by Streamer Mode") : currentUser.id}</span><button onClick={() => navigator.clipboard?.writeText(currentUser.id ?? "")}>{l("Копировать", "Copy")}</button></div>}<div className="settings-panel"><strong>{l("СЕССИЯ", "SESSION")}</strong><span>{l("Сессия защищена Supabase Auth и сохраняется в браузере.", "This session is protected by Supabase Auth and persisted in the browser.")}</span><div className="account-session-actions"><button onClick={() => void resetPassword()} disabled={passwordResetBusy}>{passwordResetBusy ? l("Отправляем код…", "Sending code…") : l("Сбросить пароль", "Reset password")}</button><button className="danger-text" onClick={() => window.dispatchEvent(new Event("moon:logout"))}>{l("Выйти", "Log Out")}</button></div></div></>;
+  return <><div className="account-card" style={{ background: `linear-gradient(180deg,${gradient.from},${gradient.to})` }}><BannerMedia className="account-banner" src={currentUser.banner}/><div className="account-info"><Avatar label={currentUser.avatar} status="online" large/><h2><NameStyle user={currentUser}>{currentUser.displayName}</NameStyle><UserBadges user={currentUser}/></h2><p>@{currentUser.username}</p><button className="primary-button small" onClick={openProfile}>{l("Редактировать профиль", "Edit User Profile")}</button></div></div><div className="settings-panel"><strong>{l("АККАУНТ СОЗДАН", "ACCOUNT CREATED")}</strong><span>{formatAccountDate(currentUser.createdAt)}</span></div>{developerMode && <div className="settings-panel"><strong>USER ID</strong><span>{streamerMode ? l("Скрыто режимом стримера", "Hidden by Streamer Mode") : currentUser.id}</span><button onClick={() => navigator.clipboard?.writeText(currentUser.id ?? "")}>{l("Копировать", "Copy")}</button></div>}<div className="settings-panel"><strong>{l("СЕССИЯ", "SESSION")}</strong><span>{l("Сессия защищена Supabase Auth и сохраняется в браузере.", "This session is protected by Supabase Auth and persisted in the browser.")}</span><div className="account-session-actions"><button onClick={() => void resetPassword()} disabled={passwordResetBusy}>{passwordResetBusy ? l("Отправляем код…", "Sending code…") : l("Сбросить пароль", "Reset password")}</button><button className="danger-text" onClick={() => window.dispatchEvent(new Event("moon:logout"))}>{l("Выйти", "Log Out")}</button></div></div></>;
 }
 
 function SidePanelOverlay({ panel, close, searchQuery, setSearchQuery, targetId }: { panel: Exclude<SidePanel, null>; close: () => void; searchQuery: string; setSearchQuery: (v: string) => void; targetId: string }) {
@@ -1238,7 +1318,7 @@ function FullProfileModal({ memberId, close }: { memberId: string; close: () => 
   const mutualFriends = members.filter((item)=>item.id!==currentUser.id && myFriendIds.has(item.id) && peerFriendIds.has(item.id));
   const mutualServers = servers.filter((server)=>{ const mine=server.ownerId===currentUser.id||server.memberIds?.includes(currentUser.id??""); const theirs=server.ownerId===member.id||server.memberIds?.includes(member.id); return mine&&theirs; });
   const gradient = member.profileGradient ?? { from:"#5865f2",to:"#7c3aed",angle:180 };
-  return <div className="modal-overlay full-profile-overlay" onMouseDown={(e)=>{if(e.target===e.currentTarget)close();}}><article className="full-profile-card" style={{"--profile-from":gradient.from,"--profile-to":gradient.to} as CSSProperties}><button className="full-profile-close" onClick={close}><X size={18}/></button><div className="full-profile-gradient"><BannerMedia className="full-profile-banner" src={member.banner}/></div><div className="full-profile-avatar"><Avatar label={member.avatar} status={member.status} large/></div><div className="full-profile-main"><div className="full-profile-name"><div><h1><NameStyle user={member}>{member.name}</NameStyle><UserBadges user={member}/></h1><p>@{member.username ?? member.name.toLowerCase()}</p></div>{member.id!==currentUser.id&&<button className="primary-button small" onClick={()=>{void createDm(member.id);close();}}><MessageCircle size={15}/>{l("Сообщение","Message")}</button>}</div>{developerMode&&<button className="copy-id-row full-profile-id" onClick={()=>navigator.clipboard?.writeText(member.id)}><code>{member.id}</code><Copy size={13}/></button>}<section><h4>{l("ОБО МНЕ","ABOUT ME")}</h4><div className="profile-bio-links"><LinkifiedText text={member.bio}/></div></section>{member.id!==currentUser.id&&!myFriendIds.has(member.id)&&<button className="secondary-button" onClick={()=>void sendFriendRequest(member.username??member.name)}><UserPlus size={15}/>{l("Добавить в друзья","Add Friend")}</button>}<div className="full-profile-columns"><section><h4>{l("ОБЩИЕ ДРУЗЬЯ","MUTUAL FRIENDS")} · {mutualFriends.length}</h4>{mutualFriends.length?<div className="mutual-list">{mutualFriends.map((friend)=><button key={friend.id} onClick={()=>window.dispatchEvent(new CustomEvent("moon:open-profile",{detail:{memberId:friend.id}}))}><Avatar label={friend.avatar} status={friend.status}/><span><strong>{friend.name}</strong><small>@{friend.username??friend.name.toLowerCase()}</small></span></button>)}</div>:<p className="mutual-empty">{l("Общих друзей нет","No mutual friends")}</p>}</section><section><h4>{l("ОБЩИЕ СЕРВЕРА","MUTUAL SERVERS")} · {mutualServers.length}</h4>{mutualServers.length?<div className="mutual-server-list">{mutualServers.map((server)=><div key={server.id}><span className="mini-server-icon" style={{background:server.accent}}>{server.icon?<img src={server.icon} alt=""/>:server.initials}</span><strong>{server.name}</strong></div>)}</div>:<p className="mutual-empty">{l("Общих серверов нет","No mutual servers")}</p>}</section></div></div></article></div>;
+  return <div className="modal-overlay full-profile-overlay" onMouseDown={(e)=>{if(e.target===e.currentTarget)close();}}><article className="full-profile-card" style={{"--profile-from":gradient.from,"--profile-to":gradient.to} as CSSProperties}><button className="full-profile-close" onClick={close}><X size={18}/></button><div className="full-profile-gradient"><BannerMedia className="full-profile-banner" src={member.banner}/></div><div className="full-profile-avatar"><Avatar label={member.avatar} status={member.status} large/></div><div className="full-profile-main"><div className="full-profile-name"><div><h1><NameStyle user={member}>{member.name}</NameStyle><UserBadges user={member}/></h1><p>@{member.username ?? member.name.toLowerCase()}</p></div>{member.id!==currentUser.id&&<button className="primary-button small" onClick={()=>{void createDm(member.id);close();}}><MessageCircle size={15}/>{l("Сообщение","Message")}</button>}</div>{developerMode&&<button className="copy-id-row full-profile-id" onClick={()=>navigator.clipboard?.writeText(member.id)}><code>{member.id}</code><Copy size={13}/></button>}<section className="profile-created full-profile-created"><h4>{l("АККАУНТ СОЗДАН","ACCOUNT CREATED")}</h4><strong>{formatAccountDate(member.createdAt)}</strong></section><section><h4>{l("ОБО МНЕ","ABOUT ME")}</h4><div className="profile-bio-links"><LinkifiedText text={member.bio}/></div></section>{member.id!==currentUser.id&&!myFriendIds.has(member.id)&&<button className="secondary-button" onClick={()=>void sendFriendRequest(member.username??member.name)}><UserPlus size={15}/>{l("Добавить в друзья","Add Friend")}</button>}<div className="full-profile-columns"><section><h4>{l("ОБЩИЕ ДРУЗЬЯ","MUTUAL FRIENDS")} · {mutualFriends.length}</h4>{mutualFriends.length?<div className="mutual-list">{mutualFriends.map((friend)=><button key={friend.id} onClick={()=>window.dispatchEvent(new CustomEvent("moon:open-profile",{detail:{memberId:friend.id}}))}><Avatar label={friend.avatar} status={friend.status}/><span><strong>{friend.name}</strong><small>@{friend.username??friend.name.toLowerCase()}</small></span></button>)}</div>:<p className="mutual-empty">{l("Общих друзей нет","No mutual friends")}</p>}</section><section><h4>{l("ОБЩИЕ СЕРВЕРА","MUTUAL SERVERS")} · {mutualServers.length}</h4>{mutualServers.length?<div className="mutual-server-list">{mutualServers.map((server)=><div key={server.id}><span className="mini-server-icon" style={{background:server.accent}}>{server.icon?<img src={server.icon} alt=""/>:server.initials}</span><strong>{server.name}</strong></div>)}</div>:<p className="mutual-empty">{l("Общих серверов нет","No mutual servers")}</p>}</section></div></div></article></div>;
 }
 function PanelMessage({ message }: { message: Message }) { return <div className="panel-message"><Avatar label={message.avatar}/><div><strong>{message.author}</strong><span>{message.timestamp}</span><p>{message.body || message.attachment?.name}</p></div></div>; }
 function searchMessages(messages: Message[], query: string) { const q = query.trim().toLowerCase(); return messages.filter((message) => !q || message.body.toLowerCase().includes(q) || message.author.toLowerCase().includes(q)).reverse(); }
@@ -1250,7 +1330,9 @@ export function MoonApp() {
   const [searchQuery, setSearchQuery] = useState("");
   const [pendingInviteCode, setPendingInviteCode] = useState<string | null>(null);
   const [fullProfileId, setFullProfileId] = useState<string | null>(null);
+  const settingsReturnPath = useRef<string | null>(null);
   const servers = useMoonStore((s) => s.servers);
+  const directMessages = useMoonStore((s) => s.directMessages);
   const theme = useMoonStore((s) => s.theme);
   const appView = useMoonStore((s) => s.appView);
   const memberListOpen = useMoonStore((s) => s.memberListOpen);
@@ -1269,7 +1351,24 @@ export function MoonApp() {
   const targetId = appView === "home" && activeDmId ? activeDmId : activeChannelId;
   const activeCall = calls.find((call) => call.status !== "ended" && (call.callerId === currentUser.id || call.calleeId === currentUser.id));
   const openSearch = (value: string) => { setSearchQuery(value); setPanel("search"); };
-  const openSettings = (page = "My Account") => { setSettingsInitialPage(page); setModal("settings"); };
+  const openSettings = (page = "My Account") => {
+    if (typeof window !== "undefined" && parseMoonRoute().kind !== "settings") settingsReturnPath.current = `${window.location.pathname}${window.location.search}`;
+    setSettingsInitialPage(page);
+    setModal("settings");
+    navigateMoon({ kind: "settings", page: SETTINGS_SLUGS[page] ?? "account" });
+  };
+  const closeSettings = () => {
+    setModal(null);
+    if (typeof window === "undefined") return;
+    const target = settingsReturnPath.current;
+    settingsReturnPath.current = null;
+    if (target) {
+      window.history.pushState({}, "", target);
+      window.dispatchEvent(new PopStateEvent("popstate"));
+    } else {
+      navigateMoon({ kind: "friends" });
+    }
+  };
 
   useEffect(() => startSupabaseRealtimeSync(), []);
   useEffect(() => {
@@ -1277,6 +1376,56 @@ export function MoonApp() {
     window.addEventListener("moon:open-profile", handler);
     return () => window.removeEventListener("moon:open-profile", handler);
   }, []);
+  useEffect(() => {
+    const applyRoute = () => {
+      const route = parseMoonRoute();
+      const state = useMoonStore.getState();
+      if (route.kind !== "settings") setModal((current) => current === "settings" ? null : current);
+
+      if (route.kind === "dm") {
+        if (!directMessages.some((dm) => dm.id === route.dmId && dm.participantIds?.includes(currentUser.id ?? ""))) return;
+        useMoonStore.setState((current) => ({
+          appView: "home",
+          activeDmId: route.dmId,
+          replyingToId: null,
+          directMessages: current.directMessages.map((dm) => dm.id === route.dmId ? { ...dm, unread: 0, hiddenFor: (dm.hiddenFor ?? []).filter((id) => id !== current.currentUser.id) } : dm),
+        }));
+        return;
+      }
+
+      if (route.kind === "server") {
+        const server = servers.find((item) => item.id === route.serverId && !bannedServerIds.includes(item.id) && !item.bannedMemberIds?.includes(currentUser.id ?? "") && (item.ownerId === currentUser.id || item.memberIds?.includes(currentUser.id ?? "")));
+        if (!server) return;
+        const requestedChannel = route.channelId ? server.channels.find((channel) => channel.id === route.channelId) : undefined;
+        const selected = requestedChannel ?? server.channels.find((channel) => channel.type === "text") ?? server.channels[0];
+        useMoonStore.setState({ appView: "server", activeServerId: server.id, activeChannelId: selected?.id ?? "", activeDmId: null, replyingToId: null });
+        if (!route.channelId && selected) navigateMoon({ kind: "server", serverId: server.id, channelId: selected.id }, true);
+        return;
+      }
+
+      if (route.kind === "settings") {
+        const page = SETTINGS_PAGES[route.page ?? "account"] ?? "My Account";
+        setSettingsInitialPage(page);
+        setModal("settings");
+        return;
+      }
+
+      if (route.kind === "plus") {
+        useMoonStore.setState({ appView: "home", activeDmId: null, homeTab: "plus", replyingToId: null });
+        return;
+      }
+
+      const allowedTabs: HomeTab[] = ["online", "all", "pending", "blocked", "add"];
+      const tab = route.kind === "friends" && route.tab && allowedTabs.includes(route.tab as HomeTab) ? route.tab as HomeTab : "online";
+      useMoonStore.setState({ appView: "home", activeDmId: null, homeTab: tab, replyingToId: null });
+      if (route.kind === "home") navigateMoon({ kind: "friends" }, true);
+    };
+
+    applyRoute();
+    window.addEventListener("popstate", applyRoute);
+    return () => window.removeEventListener("popstate", applyRoute);
+  }, [servers, directMessages, currentUser.id, bannedServerIds]);
+
   useEffect(() => {
     const supabase = getSupabaseBrowserClient();
     if (!supabase || !currentUser.id) return;
@@ -1316,6 +1465,6 @@ export function MoonApp() {
     {appView === "server" && activeServer ? <ChannelSidebar openChannelModal={() => setModal("channel")} openInviteModal={() => setModal("invite")} openServerSettings={() => setModal("serverSettings")} openSettings={openSettings}/> : <HomeSidebar openSettings={openSettings}/>} 
     <section className="main-column">{appView === "home" ? (activeDmId ? <DirectMessageChat dmId={activeDmId}/> : <FriendsScreen/>) : activeServer ? <><ChatHeader openPanel={setPanel} onSearch={openSearch}/>{channel?.type === "voice" ? <VoiceRoom channelId={channel.id} name={channel.name}/> : channel ? <><MessageList targetId={channel.id} title={channel.name}/><Composer targetId={channel.id} placeholder={`Message #${channel.name}`}/></> : <div className="empty-server-main"><Hash size={52}/><h2>No channels yet</h2><p>Create your first channel from the server sidebar.</p></div>}</> : <FriendsScreen/>}</section>
     {showMemberColumn && <MemberSidebar/>}
-    {pendingInviteCode && <InviteAcceptModal code={pendingInviteCode} close={() => { setPendingInviteCode(null); const url = new URL(window.location.href); url.searchParams.delete("invite"); window.history.replaceState({}, "", `${url.pathname}${url.search}`); }}/>} {modal === "server" && <CreateServerModal close={() => setModal(null)}/>} {modal === "channel" && <CreateChannelModal close={() => setModal(null)}/>} {modal === "settings" && <SettingsModal close={() => setModal(null)} initialPage={settingsInitialPage}/>} {modal === "invite" && <InviteModal close={() => setModal(null)}/>} {modal === "serverSettings" && <ServerSettingsModal close={() => setModal(null)}/>} {modal === "editServer" && <EditServerModal close={() => setModal(null)}/>} {panel && <SidePanelOverlay panel={panel} close={() => setPanel(null)} searchQuery={searchQuery} setSearchQuery={setSearchQuery} targetId={targetId}/>} {activeCall?.status === "ringing" && activeCall.calleeId === currentUser.id && <IncomingCallToast call={activeCall}/>} {fullProfileId && <FullProfileModal memberId={fullProfileId} close={() => setFullProfileId(null)}/>} 
+    {pendingInviteCode && <InviteAcceptModal code={pendingInviteCode} close={() => { setPendingInviteCode(null); const url = new URL(window.location.href); url.searchParams.delete("invite"); window.history.replaceState({}, "", `${url.pathname}${url.search}`); }}/>} {modal === "server" && <CreateServerModal close={() => setModal(null)}/>} {modal === "channel" && <CreateChannelModal close={() => setModal(null)}/>} {modal === "settings" && <SettingsModal close={closeSettings} initialPage={settingsInitialPage} onPageChange={(page) => navigateMoon({ kind: "settings", page: SETTINGS_SLUGS[page] ?? "account" })}/>} {modal === "invite" && <InviteModal close={() => setModal(null)}/>} {modal === "serverSettings" && <ServerSettingsModal close={() => setModal(null)}/>} {modal === "editServer" && <EditServerModal close={() => setModal(null)}/>} {panel && <SidePanelOverlay panel={panel} close={() => setPanel(null)} searchQuery={searchQuery} setSearchQuery={setSearchQuery} targetId={targetId}/>} {activeCall?.status === "ringing" && activeCall.calleeId === currentUser.id && <IncomingCallToast call={activeCall}/>} {fullProfileId && <FullProfileModal memberId={fullProfileId} close={() => setFullProfileId(null)}/>} 
   </div>;
 }

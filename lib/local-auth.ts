@@ -18,7 +18,9 @@ export type LocalAccount = {
   plusBadgeVisible: boolean;
   developer: boolean;
   nicknameColor?: string;
+  nicknameColorEnabled?: boolean;
   nicknameFont?: "default" | "serif" | "mono" | "rounded";
+  nicknameFontEnabled?: boolean;
   createdAt: string;
 };
 
@@ -51,8 +53,10 @@ export function getLocalAccounts(): LocalAccount[] {
       plusBadgeVisible: account.plusBadgeVisible !== false,
       developer: Boolean(account.developer),
       nicknameColor: account.nicknameColor ?? "#f2f3f5",
+      nicknameColorEnabled: account.nicknameColorEnabled !== false,
       nicknameFont: account.nicknameFont ?? "default",
-      createdAt: String(account.createdAt ?? new Date().toISOString()),
+      nicknameFontEnabled: account.nicknameFontEnabled !== false,
+      createdAt: String(account.createdAt ?? (() => { const match = String(account.id ?? "").match(/^local-user-(\d{10,})/); return match ? new Date(Number(match[1])).toISOString() : new Date().toISOString(); })()),
     }));
   } catch { return []; }
 }
@@ -102,7 +106,9 @@ export function registerLocalAccount(input: { email: string; username: string; d
     plusBadgeVisible: true,
     developer: Boolean(input.developer),
     nicknameColor: "#f2f3f5",
+    nicknameColorEnabled: true,
     nicknameFont: "default",
+    nicknameFontEnabled: true,
     createdAt: new Date().toISOString(),
   };
   saveAccounts([...accounts, account]);
@@ -188,6 +194,9 @@ export function accountToCurrentUser(account: LocalAccount) {
     plusBadgeVisible: account.plusBadgeVisible,
     developer: account.developer,
     nicknameColor: account.nicknameColor,
+    nicknameColorEnabled: account.nicknameColorEnabled !== false,
     nicknameFont: account.nicknameFont,
+    nicknameFontEnabled: account.nicknameFontEnabled !== false,
+    createdAt: account.createdAt,
   } as const;
 }

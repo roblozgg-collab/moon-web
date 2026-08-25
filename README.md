@@ -1,4 +1,4 @@
-# Moon Web v0.11.3 — GitHub Pages + Supabase
+# Moon Web v0.12.1 — GitHub Pages + Supabase
 
 Moon is configured so GitHub Pages hosts only the static web client while Supabase provides Auth, PostgreSQL, Storage and Realtime. No Vercel or always-on PC is required.
 
@@ -29,3 +29,9 @@ Open http://localhost:3000.
 - WebRTC: calls/media
 
 GitHub Pages cannot execute Next.js server API routes. This build therefore removes the old local `/api/local-*` backend and relies on Supabase cloud mode.
+
+
+## v0.12.1 update
+If the Supabase project already exists, run `supabase/MIGRATE_V0.12.1.sql` once before deploying.
+
+This version adds route-backed navigation (`/im/:id`, `/server/:serverId/:channelId`, `/friends`, `/plus`, `/settings/:page`), server moderation RPCs, message-deletion tombstones for realtime sync, PLUS style toggles, account creation dates, and call/profile UI fixes. `npm run build:pages` also generates `out/404.html` so direct GitHub Pages links can reopen the SPA route.

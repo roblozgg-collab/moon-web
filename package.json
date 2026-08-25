@@ -1,12 +1,12 @@
 {
   "name": "moon-web",
-  "version": "0.12.0",
+  "version": "0.12.1",
   "private": true,
   "scripts": {
     "dev": "next dev -H 0.0.0.0 -p 3000",
     "build": "next build",
     "lint": "eslint .",
-    "build:pages": "next build"
+    "build:pages": "next build && node scripts/postbuild-pages.mjs"
   },
   "dependencies": {
     "@tailwindcss/postcss": "^4.1.14",

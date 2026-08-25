@@ -2,6 +2,7 @@
 
 import { useMoonStore, type LocalSharedState } from "@/lib/store";
 import { getSupabaseBrowserClient } from "./client";
+import { profileToCurrentUser, profileToMember, type MoonProfileRow } from "./profile";
 
 const STATE_ID = "global";
 
@@ -19,6 +20,7 @@ function snapshot(updatedAt = Date.now()): LocalSharedState {
     friendLinks: state.friendLinks,
     calls: state.calls,
     invites: state.invites,
+    deletedMessageIds: state.deletedMessageIds,
     actorId: state.currentUser.id,
     updatedAt,
   };
@@ -51,17 +53,19 @@ function mergeShared(previous: LocalSharedState, incoming: LocalSharedState): Lo
     friendLinks = mergeById(unrelated, actorLinks);
   } else friendLinks = mergeById(friendLinks, incoming.friendLinks ?? []);
 
+  const deletedMessageIds = Array.from(new Set([...(previous.deletedMessageIds ?? []), ...(incoming.deletedMessageIds ?? [])]));
   return {
     ...previous,
     ...incoming,
     servers: mergeById(previous.servers, incoming.servers),
     members: mergeById(previous.members, incoming.members),
-    messages: mergeById(previous.messages, incoming.messages),
+    messages: mergeById(previous.messages, incoming.messages).filter((message) => !deletedMessageIds.includes(message.id ?? "")),
     notices: mergeById(previous.notices, incoming.notices),
     directMessages: mergeById(previous.directMessages, incoming.directMessages),
     friendLinks,
     calls: mergeCalls(previous.calls, incoming.calls),
     invites: mergeById(previous.invites, incoming.invites),
+    deletedMessageIds,
     updatedAt: Math.max(previous.updatedAt ?? 0, incoming.updatedAt ?? 0),
   };
 }
@@ -153,9 +157,16 @@ export function startSupabaseRealtimeSync() {
       const payload = event?.new?.payload;
       if (payload) applyState(payload as LocalSharedState);
     })
-    .on("postgres_changes", { event: "*", schema: "public", table: "profiles" }, async () => {
-      // Profile changes are also reflected in the shared state by each active client.
-      // Trigger a light republish so avatars/names converge quickly.
+    .on("postgres_changes", { event: "*", schema: "public", table: "profiles" }, (event: any) => {
+      const row = event?.new as MoonProfileRow | undefined;
+      if (row?.id) {
+        const member = profileToMember(row);
+        useMoonStore.setState((state) => ({
+          members: state.members.some((item) => item.id === member.id) ? state.members.map((item) => item.id === member.id ? member : item) : [...state.members, member],
+          ...(state.currentUser.id === row.id ? { currentUser: profileToCurrentUser(row) } : {}),
+        }));
+      }
+      // Keep the shared beta document in sync too, including avatar/name/date fields.
       schedulePublish();
     })
     .on("broadcast", { event: "typing" }, ({ payload }: any) => applyTyping(payload as TypingPayload))

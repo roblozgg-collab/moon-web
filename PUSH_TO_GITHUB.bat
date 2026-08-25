@@ -18,7 +18,7 @@ git remote get-url origin >nul 2>&1
 if errorlevel 1 git remote add origin https://github.com/roblozgg-collab/moon-web.git
 
 git add -A
-git commit -m "Moon v0.11.3 cloud auth fix"
+git commit -m "Moon v0.12.1 calls routes moderation profile fixes"
 git push -u origin main
 
 pause

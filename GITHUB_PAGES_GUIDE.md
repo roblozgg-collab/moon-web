@@ -70,3 +70,19 @@ GitHub Actions автоматически соберёт `out/` и обнови�
 GitHub Pages — статический хостинг. Node/Next API routes там не запускаются. Поэтому постоянная логика Moon идёт через Supabase; звонки идут через WebRTC, а Supabase Realtime используется для состояния/signaling.
 
 Приглашения в этой Pages-сборке используют рабочий URL вида `https://...github.io/moon-web/?invite=CODE`, потому что GitHub Pages не предоставляет серверный rewrite для произвольного `/invite/CODE`. Позже с собственным доменом можно сделать красивую `moon.dev/CODE` через отдельный edge/proxy слой.
+
+
+## 9. Прямые ссылки Moon v0.12.1
+
+Moon теперь синхронизирует состояние интерфейса с URL, например:
+
+- `/friends`
+- `/plus`
+- `/im/<chatId>`
+- `/server/<serverId>/<channelId>`
+- `/settings/account`
+- `/settings/appearance`
+
+Для GitHub Pages команда `npm run build:pages` после сборки автоматически создаёт `out/404.html` из главной страницы. Благодаря этому прямой переход или F5 на вложенном Moon URL возвращает SPA, а приложение восстанавливает нужный экран по адресу.
+
+Перед первым деплоем v0.12.1 на уже существующий Supabase-проект один раз выполни `supabase/MIGRATE_V0.12.1.sql` через SQL Editor.

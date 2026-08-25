@@ -21,8 +21,9 @@ import {
   type ServerInvite,
 } from "./data";
 import { getLocalAccounts, updateLocalAccount } from "./local-auth";
-import { isSupabaseConfigured } from "./supabase/client";
+import { getSupabaseBrowserClient, isSupabaseConfigured } from "./supabase/client";
 import { findRemoteProfileByUsername, persistCurrentProfilePatch, profileToMember, validateRemoteUsername } from "./supabase/profile";
+import { navigateMoon } from "./routes";
 
 export type HomeTab = "online" | "all" | "pending" | "blocked" | "add" | "plus";
 export type MoonTheme = "black" | "gray" | "light" | "plus";
@@ -41,7 +42,10 @@ export type CurrentUser = {
   plusBadgeVisible?: boolean;
   developer?: boolean;
   nicknameColor?: string;
+  nicknameColorEnabled?: boolean;
   nicknameFont?: "default" | "serif" | "mono" | "rounded";
+  nicknameFontEnabled?: boolean;
+  createdAt?: string;
   adminNameGradient?: { from: string; to: string } | null;
 };
 
@@ -69,6 +73,7 @@ export type LocalSharedState = {
   friendLinks: FriendLink[];
   calls: CallSession[];
   invites: ServerInvite[];
+  deletedMessageIds: string[];
   actorId?: string;
   updatedAt: number;
 };
@@ -82,6 +87,7 @@ type MoonState = {
   notices: Notice[];
   calls: CallSession[];
   invites: ServerInvite[];
+  deletedMessageIds: string[];
   activeServerId: string;
   activeChannelId: string;
   appView: "server" | "home";
@@ -117,7 +123,7 @@ type MoonState = {
   addMessage: (body: string, targetId?: string, attachment?: Attachment) => void;
   editMessage: (messageId: string, body: string) => void;
   toggleReaction: (messageId: string, emoji: string) => void;
-  deleteMessage: (messageId: string) => void;
+  deleteMessage: (messageId: string, moderatorServerId?: string) => Promise<void>;
   togglePin: (messageId: string) => void;
   setReplyingTo: (messageId: string | null) => void;
   createServer: (name: string) => void;
@@ -158,7 +164,9 @@ type MoonState = {
   setPlusBadgeVisible: (visible: boolean) => void;
   setLocalPlusPreview: (enabled: boolean) => void;
   purchasePlus: () => void;
-  setPlusStyle: (patch: Partial<Pick<CurrentUser, "nicknameColor" | "nicknameFont">>) => void;
+  setPlusStyle: (patch: Partial<Pick<CurrentUser, "nicknameColor" | "nicknameColorEnabled" | "nicknameFont" | "nicknameFontEnabled">>) => void;
+  banServerMember: (serverId: string, memberId: string) => Promise<{ ok: boolean; message?: string }>;
+  muteServerMember: (serverId: string, memberId: string, minutes?: number) => Promise<{ ok: boolean; message?: string }>;
   startCall: (dmId: string, peerId: string, video?: boolean) => string;
   acceptCall: (callId: string) => void;
   declineCall: (callId: string) => void;
@@ -199,7 +207,10 @@ function makeInitialMember(user: CurrentUser): Member | null {
     plusBadgeVisible: user.plusBadgeVisible !== false,
     developer: user.developer,
     nicknameColor: user.nicknameColor,
+    nicknameColorEnabled: user.nicknameColorEnabled !== false,
     nicknameFont: user.nicknameFont,
+    nicknameFontEnabled: user.nicknameFontEnabled !== false,
+    createdAt: user.createdAt,
     adminNameGradient: user.adminNameGradient ?? null,
   };
 }
@@ -229,9 +240,21 @@ function buildFriends(links: FriendLink[], members: Member[], userId?: string): 
   return result;
 }
 
+export function hasServerPermission(server: Server | undefined, userId: string | undefined, permission: string) {
+  if (!server || !userId) return false;
+  if (server.ownerId === userId) return true;
+  const roleIds = server.roleAssignments?.[userId] ?? [];
+  return (server.roles ?? []).some((role) => roleIds.includes(role.id) && (role.permissions.includes("ADMINISTRATOR") || role.permissions.includes(permission)));
+}
+
+function canAccessServer(server: Server, userId?: string) {
+  if (!userId || server.bannedMemberIds?.includes(userId)) return false;
+  return server.ownerId === userId || server.memberIds?.includes(userId);
+}
+
 function visibleServer(state: Pick<MoonState, "servers" | "currentUser">, excluding?: string) {
   const userId = state.currentUser.id;
-  return state.servers.find((server) => server.id !== excluding && (server.ownerId === userId || server.memberIds?.includes(userId ?? "")));
+  return state.servers.find((server) => server.id !== excluding && canAccessServer(server, userId));
 }
 
 function loadSettings(userId?: string): UserSettings {
@@ -254,6 +277,7 @@ export const useMoonStore = create<MoonState>((set, get) => ({
   notices: seedNotices,
   calls: [],
   invites: [],
+  deletedMessageIds: [],
   activeServerId: "",
   activeChannelId: "",
   appView: "home",
@@ -279,19 +303,23 @@ export const useMoonStore = create<MoonState>((set, get) => ({
   setActiveServer: (serverId) => {
     if (get().bannedServerIds.includes(serverId)) return;
     const server = get().servers.find((item) => item.id === serverId);
-    if (!server) return;
+    if (!server || !canAccessServer(server, get().currentUser.id)) return;
     const first = server.channels.find((channel) => channel.type === "text") ?? server.channels[0];
     set({ appView: "server", activeServerId: server.id, activeChannelId: first?.id ?? "", activeDmId: null, replyingToId: null });
+    navigateMoon({ kind: "server", serverId: server.id, channelId: first?.id });
   },
-  setActiveChannel: (activeChannelId) => set({ appView: "server", activeChannelId, replyingToId: null }),
-  openHome: () => set({ appView: "home", activeDmId: null, replyingToId: null }),
-  setHomeTab: (homeTab) => set({ appView: "home", homeTab, activeDmId: null }),
-  openDm: (activeDmId) => set((state) => ({
-    appView: "home",
-    activeDmId,
-    replyingToId: null,
-    directMessages: state.directMessages.map((dm) => dm.id === activeDmId ? { ...dm, unread: 0, hiddenFor: (dm.hiddenFor ?? []).filter((id) => id !== state.currentUser.id) } : dm),
-  })),
+  setActiveChannel: (activeChannelId) => { const serverId = get().activeServerId; set({ appView: "server", activeChannelId, replyingToId: null }); if (serverId) navigateMoon({ kind: "server", serverId, channelId: activeChannelId }); },
+  openHome: () => { set({ appView: "home", activeDmId: null, replyingToId: null }); navigateMoon({ kind: "friends" }); },
+  setHomeTab: (homeTab) => { set({ appView: "home", homeTab, activeDmId: null }); navigateMoon(homeTab === "plus" ? { kind: "plus" } : { kind: "friends", tab: homeTab }); },
+  openDm: (activeDmId) => {
+    set((state) => ({
+      appView: "home",
+      activeDmId,
+      replyingToId: null,
+      directMessages: state.directMessages.map((dm) => dm.id === activeDmId ? { ...dm, unread: 0, hiddenFor: (dm.hiddenFor ?? []).filter((id) => id !== state.currentUser.id) } : dm),
+    }));
+    navigateMoon({ kind: "dm", dmId: activeDmId });
+  },
   createDm: async (memberId) => {
     const me = get().currentUser.id;
     if (!me || memberId === me) return null;
@@ -300,12 +328,17 @@ export const useMoonStore = create<MoonState>((set, get) => ({
     const participantIds = [me, memberId].sort();
     const dmId = `dm-${participantIds.join("-")}`;
     set((state) => ({ directMessages: [...state.directMessages, { id: dmId, memberId, participantIds }], appView: "home", activeDmId: dmId }));
+    navigateMoon({ kind: "dm", dmId });
     return dmId;
   },
-  closeDm: (dmId) => set((state) => ({
-    activeDmId: state.activeDmId === dmId ? null : state.activeDmId,
-    directMessages: state.directMessages.map((dm) => dm.id === dmId && state.currentUser.id ? { ...dm, hiddenFor: Array.from(new Set([...(dm.hiddenFor ?? []), state.currentUser.id])) } : dm),
-  })),
+  closeDm: (dmId) => {
+    const wasActive = get().activeDmId === dmId;
+    set((state) => ({
+      activeDmId: state.activeDmId === dmId ? null : state.activeDmId,
+      directMessages: state.directMessages.map((dm) => dm.id === dmId && state.currentUser.id ? { ...dm, hiddenFor: Array.from(new Set([...(dm.hiddenFor ?? []), state.currentUser.id])) } : dm),
+    }));
+    if (wasActive) navigateMoon({ kind: "friends" });
+  },
   toggleDmPin: (dmId) => set((state) => ({ directMessages: state.directMessages.map((dm) => {
     if (dm.id !== dmId || !state.currentUser.id) return dm;
     const pinned = dm.pinnedFor ?? [];
@@ -324,6 +357,7 @@ export const useMoonStore = create<MoonState>((set, get) => ({
     const state = get();
     const channelId = targetId ?? (state.appView === "home" ? state.activeDmId ?? "" : state.activeChannelId);
     if (!channelId) return;
+    if (state.appView === "server") { const server = state.servers.find((item) => item.channels.some((channel) => channel.id === channelId)); const mutedUntil = server?.mutedMembers?.[state.currentUser.id ?? ""] ?? 0; if (mutedUntil > Date.now()) return; }
     const message: Message = {
       id: `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       channelId,
@@ -357,10 +391,21 @@ export const useMoonStore = create<MoonState>((set, get) => ({
     }
     return { ...message, reactions, reacted };
   }) })),
-  deleteMessage: (messageId) => set((state) => ({
-    messages: state.messages.filter((message) => !(message.id === messageId && message.authorId === state.currentUser.id)),
-    replyingToId: state.replyingToId === messageId ? null : state.replyingToId,
-  })),
+  deleteMessage: async (messageId, moderatorServerId) => {
+    const state = get();
+    const message = state.messages.find((item) => item.id === messageId);
+    const server = moderatorServerId ? state.servers.find((item) => item.id === moderatorServerId) : undefined;
+    const own = Boolean(message && message.authorId === state.currentUser.id);
+    const moderator = Boolean(message && server && hasServerPermission(server, state.currentUser.id, "MANAGE_MESSAGES") && server.channels.some((channel) => channel.id === message.channelId));
+    if (!message || (!own && !moderator)) return;
+    if (!own && moderatorServerId && isSupabaseConfigured()) {
+      const supabase = getSupabaseBrowserClient();
+      if (!supabase) return;
+      const { error } = await supabase.rpc("moon_server_delete_message", { target_server_id: moderatorServerId, target_message_id: messageId });
+      if (error) { console.error("Moon moderator delete denied:", error.message); return; }
+    }
+    set((current) => ({ messages: current.messages.filter((item) => item.id !== messageId), deletedMessageIds: Array.from(new Set([...current.deletedMessageIds, messageId])), replyingToId: current.replyingToId === messageId ? null : current.replyingToId }));
+  },
   togglePin: (messageId) => set((state) => ({ messages: state.messages.map((message) => message.id === messageId ? { ...message, pinned: !message.pinned } : message) })),
   setReplyingTo: (replyingToId) => set({ replyingToId }),
 
@@ -378,6 +423,7 @@ export const useMoonStore = create<MoonState>((set, get) => ({
       channels: [],
     };
     set((current) => ({ servers: [...current.servers, server], appView: "server", activeServerId: id, activeChannelId: "", activeDmId: null }));
+    navigateMoon({ kind: "server", serverId: id });
   },
   createChannel: (name, type) => {
     const state = get();
@@ -386,6 +432,7 @@ export const useMoonStore = create<MoonState>((set, get) => ({
     const clean = (name.trim() || "new-channel").toLowerCase().replace(/\s+/g, "-");
     const id = `${state.activeServerId}-${clean}-${Date.now()}`;
     set((current) => ({ servers: current.servers.map((item) => item.id === current.activeServerId ? { ...item, channels: [...item.channels, { id, name: clean, type }] } : item), appView: "server", activeChannelId: id }));
+    navigateMoon({ kind: "server", serverId: state.activeServerId, channelId: id });
   },
   updateServer: (serverId, patch) => set((state) => ({ servers: state.servers.map((server) => {
     if (server.id !== serverId || server.ownerId !== state.currentUser.id) return server;
@@ -402,6 +449,7 @@ export const useMoonStore = create<MoonState>((set, get) => ({
       messages: state.messages.filter((message) => !target.channels.some((channel) => channel.id === message.channelId)),
       ...(state.activeServerId === serverId ? (next ? { activeServerId: next.id, activeChannelId: next.channels[0]?.id ?? "" } : { appView: "home" as const, activeServerId: "", activeChannelId: "" }) : {}),
     });
+    if (state.activeServerId === serverId) next ? navigateMoon({ kind: "server", serverId: next.id, channelId: next.channels[0]?.id }) : navigateMoon({ kind: "friends" });
   },
   leaveServer: (serverId) => {
     const state = get();
@@ -412,6 +460,7 @@ export const useMoonStore = create<MoonState>((set, get) => ({
       servers: state.servers.map((server) => server.id === serverId ? { ...server, memberIds: (server.memberIds ?? []).filter((id) => id !== state.currentUser.id) } : server),
       ...(state.activeServerId === serverId ? (next ? { activeServerId: next.id, activeChannelId: next.channels[0]?.id ?? "" } : { appView: "home" as const, activeServerId: "", activeChannelId: "" }) : {}),
     });
+    if (state.activeServerId === serverId) next ? navigateMoon({ kind: "server", serverId: next.id, channelId: next.channels[0]?.id }) : navigateMoon({ kind: "friends" });
   },
   inviteUserToServer: (serverId, userId) => set((state) => ({ servers: state.servers.map((server) => {
     if (server.id !== serverId || !state.currentUser.id) return server;
@@ -559,10 +608,10 @@ export const useMoonStore = create<MoonState>((set, get) => ({
         persistCurrentProfilePatch(patch);
       } else {
         const account = updateLocalAccount(state.currentUser.id, patch as any);
-        nextUser = { ...state.currentUser, displayName: account.displayName, username: account.username, avatar: account.avatar, banner: account.banner, bio: account.bio, profileGradient: account.profileGradient, plus: account.plus, plusBadgeVisible: account.plusBadgeVisible, developer: account.developer, nicknameColor: account.nicknameColor, nicknameFont: account.nicknameFont, adminNameGradient: nextUser.adminNameGradient };
+        nextUser = { ...state.currentUser, displayName: account.displayName, username: account.username, avatar: account.avatar, banner: account.banner, bio: account.bio, profileGradient: account.profileGradient, plus: account.plus, plusBadgeVisible: account.plusBadgeVisible, developer: account.developer, nicknameColor: account.nicknameColor, nicknameColorEnabled: account.nicknameColorEnabled, nicknameFont: account.nicknameFont, nicknameFontEnabled: account.nicknameFontEnabled, createdAt: account.createdAt, adminNameGradient: nextUser.adminNameGradient };
       }
       set((current) => {
-        const members = current.members.map((member) => member.id === nextUser.id ? { ...member, name: nextUser.displayName, username: nextUser.username, avatar: nextUser.avatar, banner: nextUser.banner, bio: nextUser.bio, profileGradient: nextUser.profileGradient, plus: nextUser.plus, plusBadgeVisible: nextUser.plusBadgeVisible, developer: nextUser.developer, nicknameColor: nextUser.nicknameColor, nicknameFont: nextUser.nicknameFont, adminNameGradient: nextUser.adminNameGradient } : member);
+        const members = current.members.map((member) => member.id === nextUser.id ? { ...member, name: nextUser.displayName, username: nextUser.username, avatar: nextUser.avatar, banner: nextUser.banner, bio: nextUser.bio, profileGradient: nextUser.profileGradient, plus: nextUser.plus, plusBadgeVisible: nextUser.plusBadgeVisible, developer: nextUser.developer, nicknameColor: nextUser.nicknameColor, nicknameColorEnabled: nextUser.nicknameColorEnabled, nicknameFont: nextUser.nicknameFont, nicknameFontEnabled: nextUser.nicknameFontEnabled, createdAt: nextUser.createdAt, adminNameGradient: nextUser.adminNameGradient } : member);
         return { currentUser: nextUser, members, friends: buildFriends(current.friendLinks, members, nextUser.id), messages: current.messages.map((message) => message.authorId === nextUser.id ? { ...message, author: nextUser.displayName, avatar: nextUser.avatar, own: true } : message) };
       });
       return { ok: true };
@@ -587,7 +636,7 @@ export const useMoonStore = create<MoonState>((set, get) => ({
     if (!target && !isSupabaseConfigured()) {
       const local = getLocalAccounts().find((account) => account.username === key);
       if (local) {
-        target = { id: local.id, name: local.displayName, username: local.username, status: local.status === "invisible" ? "offline" : local.status, role: "ONLINE", avatar: local.avatar, banner: local.banner, bio: local.bio, profileGradient: local.profileGradient, plus: local.plus, plusBadgeVisible: local.plusBadgeVisible, developer: local.developer };
+        target = { id: local.id, name: local.displayName, username: local.username, status: local.status === "invisible" ? "offline" : local.status, role: "ONLINE", avatar: local.avatar, banner: local.banner, bio: local.bio, profileGradient: local.profileGradient, plus: local.plus, plusBadgeVisible: local.plusBadgeVisible, developer: local.developer, nicknameColor: local.nicknameColor, nicknameColorEnabled: local.nicknameColorEnabled, nicknameFont: local.nicknameFont, nicknameFontEnabled: local.nicknameFontEnabled, createdAt: local.createdAt };
         set((current) => ({ members: mergeMembers(current.members, target!) }));
       }
     }
@@ -708,6 +757,34 @@ export const useMoonStore = create<MoonState>((set, get) => ({
       members: current.members.map((member) => member.id === current.currentUser.id ? { ...member, ...patch } : member),
     }));
   },
+  banServerMember: async (serverId, memberId) => {
+    const state = get();
+    const server = state.servers.find((item) => item.id === serverId);
+    if (!server || !hasServerPermission(server, state.currentUser.id, "BAN_MEMBERS") || memberId === server.ownerId) return { ok: false, message: "Недостаточно прав." };
+    if (isSupabaseConfigured()) {
+      const supabase = getSupabaseBrowserClient();
+      if (!supabase) return { ok: false, message: "Supabase unavailable." };
+      const { error } = await supabase.rpc("moon_server_ban_member", { target_server_id: serverId, target_user_id: memberId });
+      if (error) return { ok: false, message: error.message };
+    }
+    set((current) => ({ servers: current.servers.map((item) => item.id !== serverId ? item : { ...item, memberIds: (item.memberIds ?? []).filter((id) => id !== memberId), bannedMemberIds: Array.from(new Set([...(item.bannedMemberIds ?? []), memberId])) }) }));
+    return { ok: true };
+  },
+  muteServerMember: async (serverId, memberId, minutes = 60) => {
+    const state = get();
+    const server = state.servers.find((item) => item.id === serverId);
+    if (!server || !hasServerPermission(server, state.currentUser.id, "MANAGE_MESSAGES") || memberId === server.ownerId) return { ok: false, message: "Недостаточно прав." };
+    const safeMinutes = Math.max(1, minutes);
+    if (isSupabaseConfigured()) {
+      const supabase = getSupabaseBrowserClient();
+      if (!supabase) return { ok: false, message: "Supabase unavailable." };
+      const { error } = await supabase.rpc("moon_server_mute_member", { target_server_id: serverId, target_user_id: memberId, duration_minutes: safeMinutes });
+      if (error) return { ok: false, message: error.message };
+    }
+    const until = Date.now() + safeMinutes * 60_000;
+    set((current) => ({ servers: current.servers.map((item) => item.id !== serverId ? item : { ...item, mutedMembers: { ...(item.mutedMembers ?? {}), [memberId]: until } }) }));
+    return { ok: true };
+  },
 
   startCall: (dmId, peerId, video = false) => {
     const state = get();
@@ -718,10 +795,13 @@ export const useMoonStore = create<MoonState>((set, get) => ({
     const base = { muted: state.muted, deafened: state.deafened, camera: video, screen: false };
     const call: CallSession = { id, dmId, callerId: state.currentUser.id, calleeId: peerId, status: "ringing", video, createdAt: Date.now(), participantState: { [state.currentUser.id]: base, [peerId]: { muted: false, deafened: false, camera: false, screen: false } } };
     set({ calls: [...state.calls, call], cameraEnabled: video, appView: "home", activeDmId: dmId });
+    navigateMoon({ kind: "dm", dmId });
+    if (typeof window !== "undefined") window.setTimeout(() => { const live = get().calls.find((item) => item.id === id); if (live?.status === "ringing") get().endCall(id); }, 45_000);
     return id;
   },
   acceptCall: (callId) => set((state) => {
     const target = state.calls.find((call) => call.id === callId);
+    if (target) navigateMoon({ kind: "dm", dmId: target.dmId });
     return { calls: state.calls.map((call) => call.id === callId ? { ...call, status: "active", startedAt: Date.now() } : call), ...(target ? { appView: "home" as const, activeDmId: target.dmId, cameraEnabled: target.video } : {}) };
   }),
   declineCall: (callId) => get().endCall(callId),
@@ -739,13 +819,14 @@ export const useMoonStore = create<MoonState>((set, get) => ({
     return {
       servers: payload.servers ?? [],
       members,
-      messages: normalizeOwnership(payload.messages ?? [], state.currentUser.id),
+      messages: normalizeOwnership((payload.messages ?? []).filter((message) => !new Set([...(state.deletedMessageIds ?? []), ...(payload.deletedMessageIds ?? [])]).has(message.id)), state.currentUser.id),
       notices: payload.notices ?? [],
       directMessages: payload.directMessages ?? [],
       friendLinks,
       friends: buildFriends(friendLinks, members, state.currentUser.id),
       calls: payload.calls ?? [],
       invites: payload.invites ?? [],
+      deletedMessageIds: Array.from(new Set([...(state.deletedMessageIds ?? []), ...(payload.deletedMessageIds ?? [])])),
     };
   }),
 }));

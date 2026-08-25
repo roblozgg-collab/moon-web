@@ -17,7 +17,9 @@ export type MoonProfileRow = {
   plus_badge_visible: boolean | null;
   developer: boolean | null;
   nickname_color: string | null;
+  nickname_color_enabled: boolean | null;
   nickname_font: "default" | "serif" | "mono" | "rounded" | null;
+  nickname_font_enabled: boolean | null;
   admin_name_gradient: { from: string; to: string } | null;
   created_at?: string;
   updated_at?: string;
@@ -49,7 +51,10 @@ export function profileToCurrentUser(profile: MoonProfileRow): CurrentUser {
     plusBadgeVisible: profile.plus_badge_visible !== false,
     developer: Boolean(profile.developer),
     nicknameColor: profile.nickname_color ?? "#f2f3f5",
+    nicknameColorEnabled: profile.nickname_color_enabled !== false,
     nicknameFont: profile.nickname_font ?? "default",
+    nicknameFontEnabled: profile.nickname_font_enabled !== false,
+    createdAt: profile.created_at,
     adminNameGradient: profile.admin_name_gradient ?? null,
   };
 }
@@ -71,7 +76,10 @@ export function profileToMember(profile: MoonProfileRow): Member {
     plusBadgeVisible: current.plusBadgeVisible,
     developer: current.developer,
     nicknameColor: current.nicknameColor,
+    nicknameColorEnabled: current.nicknameColorEnabled,
     nicknameFont: current.nicknameFont,
+    nicknameFontEnabled: current.nicknameFontEnabled,
+    createdAt: current.createdAt,
     adminNameGradient: current.adminNameGradient ?? null,
   };
 }
@@ -122,7 +130,9 @@ export async function updateMyRemoteProfile(patch: Partial<CurrentUser>) {
   if (patch.plus !== undefined) dbPatch.plus = patch.plus;
   if (patch.plusBadgeVisible !== undefined) dbPatch.plus_badge_visible = patch.plusBadgeVisible;
   if (patch.nicknameColor !== undefined) dbPatch.nickname_color = patch.nicknameColor;
+  if (patch.nicknameColorEnabled !== undefined) dbPatch.nickname_color_enabled = patch.nicknameColorEnabled;
   if (patch.nicknameFont !== undefined) dbPatch.nickname_font = patch.nicknameFont;
+  if (patch.nicknameFontEnabled !== undefined) dbPatch.nickname_font_enabled = patch.nicknameFontEnabled;
 
   const { data, error } = await supabase.from("profiles").update(dbPatch).eq("id", user.id).select("*").single();
   if (error) {
